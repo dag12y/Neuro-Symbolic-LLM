@@ -95,3 +95,83 @@ with TemporaryDirectory() as tmp:
     print(found.kind, found.name, found.label)
     assert verify_manifest(export_manifest(registry, record_id))[-1] == found
 ```
+
+## Register the repository's semantic parser definitions
+
+Run from the checkout root with the project's Python environment. The adapter
+uses the existing PyYAML-based loaders. It registers the modules selected by
+the default `semantic-extraction-v1.yaml` bundle and checks the bundle's version
+pins before registering any records. Ontology modules and the bundle use their
+declared release labels and raw YAML byte digests. A byte change, including a
+comment-only edit, conflicts with an existing release label in the same
+registry. Semantic compatibility remains a separate decision.
+
+The contract record uses the exact bytes of `parser/semantic/schema.py` and its
+declared `SEMANTIC_CONTRACT_VERSION`. The parser implementation record uses
+`PARSER_VERSION` and hashes the parser, backend adapters, ontology loader,
+normalization, output cleanup, MeTTa rendering, and Atomese grammar sources.
+Both labels are locators. The implementation record links to the contract,
+bundle, and prompt records. Set `include_git_provenance=True` to attach the
+checkout's HEAD commit when it contains the exact captured implementation
+source files. This optional producer field affects the implementation record
+ID. Copies without Git metadata can still be registered.
+
+The adapter records router, general, discourse, routed extraction, and student
+prompt definitions. The three teacher YAML labels and the student label are
+families. Routed extraction links the general and discourse prompts and has no
+separate label in the parser. It includes the shared Python source containing
+the combined instructions and framing. Teacher definitions use the full
+`catalog_prompt.py` source, so an edit there can change multiple teacher IDs.
+The student definition uses `student_prompt.py`. Source-set digests hash
+`versioning:source-set:v1` followed by a NUL byte and the canonical mapping from
+repository-relative paths to raw file SHA-256 digests. Prompt dependencies
+cover the contract and the ontology inputs used by each definition.
+The router reads no ontology guide. Runtime prompt-version and fingerprint
+strings remain in the parser's existing APIs.
+
+This snapshot covers the default bundle and selected source definitions. It
+does not capture the final provider request, document or context text, selected
+runtime route, correction message instances, tokenizer chat templates, model
+weights, generation settings, or installed dependency versions. Each record
+is published individually. If a release conflict interrupts registration,
+earlier successful records are already available.
+
+The following commands register into a caller-selected directory, inspect
+records by ID or label, and write a portable manifest for manual verification.
+
+```bash
+REGISTRY_DIR=.version-registry/semantic-demo
+MANIFEST_PATH=/tmp/semantic-components.json
+
+.venv/bin/python - "$REGISTRY_DIR" "$MANIFEST_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+from versioning import Registry, export_manifest
+from versioning.semantic import register_semantic_components
+
+registry = Registry(sys.argv[1])
+ids = register_semantic_components(registry, project_root=Path.cwd())
+
+print("implementation", ids.parser)
+print("contract", ids.contract)
+print("bundle", ids.ontology_bundle)
+print("modules", dict(ids.ontology_modules))
+print("prompts", dict(ids.prompts))
+print(registry.get(ids.contract).to_dict())
+for record in registry.find("teacher-prompt", "general", label="general-v1"):
+    print(record.to_dict())
+
+Path(sys.argv[2]).write_bytes(export_manifest(registry, ids.parser))
+PY
+
+.venv/bin/python - "$MANIFEST_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+from versioning import verify_manifest
+
+records = verify_manifest(Path(sys.argv[1]).read_bytes())
+print("verified", len(records), "records with root", records[-1].record_id)
+PY
+```
