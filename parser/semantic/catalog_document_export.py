@@ -7,16 +7,21 @@ fingerprinted checkpoint, so an interrupted run resumes where it stopped.
 from __future__ import annotations
 
 import json
+import math
 import re
 from contextlib import ExitStack
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from parser.semantic.document_metadata import document_metadata, metadata_path
 from parser.semantic.schema import SourceDocument
 from parser.semantic.semantic_parser import ReferenceSemanticParser
+from versioning import Registry, export_manifest
+from versioning.export import export_sidecar_path, publish_export_sidecar
+from versioning.semantic import register_semantic_components
 
 _SOURCE_FIELDS = frozenset({"document_id", "corpus_id", "source_text"})
 _IDENTIFIER = re.compile(r"^[^\s]+$")
@@ -32,6 +37,7 @@ class ExportResult:
     rejected_path: Path
     student_pairs_path: Path | None = None
     metadata_path: Path | None = None
+    versions_path: Path | None = None
 
 
 def _source_fields(raw_line: str) -> tuple[str, str, str]:
@@ -129,12 +135,14 @@ def export_catalog_documents(
     }
     if student_pairs_path is not None:
         outputs["pairs"] = Path(student_pairs_path)
+    sidecar = export_sidecar_path(accepted)
     checkpoint = accepted.with_name(accepted.name + ".checkpoint.json")
     partials = {
         name: path.with_name(path.name + ".partial") for name, path in outputs.items()
     }
     paths = [
         source,
+        sidecar,
         checkpoint,
         checkpoint.with_name(checkpoint.name + ".tmp"),
         *outputs.values(),
@@ -181,6 +189,11 @@ def export_catalog_documents(
             raise ValueError(
                 "Export checkpoint does not match source, outputs, model, or prompt"
             )
+        if state.get("versioning_invalid"):
+            raise ValueError(
+                "Export checkpoint was invalidated by changed inputs or definitions; "
+                "start a fresh export"
+            )
         if set(state.get("files", {})) != set(outputs):
             raise ValueError("Export checkpoint has an invalid artifact set")
         if any(
@@ -217,11 +230,35 @@ def export_catalog_documents(
             if outputs[name].exists() and partial.exists():
                 raise FileExistsError(f"Output already exists: {outputs[name]}")
     else:
-        for path in [checkpoint, *outputs.values(), *partials.values()]:
-            if path.exists():
+        for path in [checkpoint, sidecar, *outputs.values(), *partials.values()]:
+            if path.exists() or path.is_symlink():
                 raise FileExistsError(
                     f"Output already exists: {path}; use --resume for an interrupted export"
                 )
+    if resume and not state["complete"] and (sidecar.exists() or sidecar.is_symlink()):
+        raise FileExistsError(
+            f"Version sidecar exists for an incomplete export: {sidecar}"
+        )
+
+    parser_id, components = _component_snapshot(parser)
+    settings = _manifest_settings(parser, source, identity)
+    settings["student_pairs"] = "pairs" in outputs
+    stamp = {"parser_record_id": parser_id, "settings": settings}
+    previous = state.get("versioning")
+    if "versioning" in state and (
+        not isinstance(previous, dict)
+        or type(previous.get("legacy_prefix")) is not bool
+        or previous != dict(stamp, legacy_prefix=previous["legacy_prefix"])
+    ):
+        raise ValueError(
+            "Export checkpoint does not match versioned components or settings"
+        )
+    legacy_prefix = (
+        previous["legacy_prefix"] if previous is not None else state["line_number"] > 0
+    )
+    state["versioning"] = dict(stamp, legacy_prefix=legacy_prefix)
+    if resume and state["complete"] and previous is None:
+        _write_checkpoint(checkpoint, state)
     for path in outputs.values():
         path.parent.mkdir(parents=True, exist_ok=True)
     if not state["complete"]:
@@ -354,20 +391,92 @@ def export_catalog_documents(
             if state["files"]:
                 _write_checkpoint(checkpoint, state)
             raise
+    source_changed = _file_digest(source) != identity["source_sha256"]
+    if source_changed or _component_snapshot(parser)[0] != parser_id:
+        state["versioning_invalid"] = True
+        _write_checkpoint(checkpoint, state)
+        changed = "source" if source_changed else "component definitions"
+        raise ValueError(
+            f"Export {changed} changed during processing; start a fresh export"
+        )
     for name, partial in partials.items():
         if partial.exists():
             if outputs[name].exists():
                 raise FileExistsError(f"Output already exists: {outputs[name]}")
             partial.rename(outputs[name])
+    unresolved = [
+        "provider and model IDs and revision annotation omitted from sidecar",
+        "resolved model weights or provider revision and tokenizer templates",
+        "fully rendered provider requests, correction calls and runtime dependency versions",
+        "settings unavailable through the parser or backend",
+    ]
+    if legacy_prefix:
+        unresolved.append(
+            "component IDs and effective settings for the legacy checkpoint prefix"
+        )
+    try:
+        publish_export_sidecar(
+            accepted,
+            expected_sha256=state["files"]["documents"]["sha256"],
+            source_sha256=identity["source_sha256"],
+            parser_record_id=parser_id,
+            component_manifest=components,
+            settings=settings,
+            unresolved=unresolved,
+        )
+    except (OSError, ValueError) as error:
+        raise OSError(
+            f"Export artifacts finalized but version sidecar could not be published: "
+            f"{error}. Checkpoint retained; fix the cause and use --resume."
+        ) from error
     checkpoint.unlink()
     return ExportResult(
-        state["accepted"],
-        state["rejected"],
-        accepted,
-        rejected,
-        outputs.get("pairs"),
-        outputs["metadata"],
+        accepted=state["accepted"],
+        rejected=state["rejected"],
+        output_path=accepted,
+        rejected_path=rejected,
+        student_pairs_path=outputs.get("pairs"),
+        metadata_path=outputs["metadata"],
+        versions_path=sidecar,
     )
+
+
+def _component_snapshot(parser: ReferenceSemanticParser) -> tuple[str, bytes]:
+    # Build a portable closure without depending on a persistent local registry.
+    with TemporaryDirectory() as root:
+        registry = Registry(root)
+        ids = register_semantic_components(
+            registry,
+            project_root=Path(__file__).resolve().parents[2],
+            effective_catalog=parser._catalog,
+        )
+        return ids.parser, export_manifest(registry, ids.parser)
+
+
+def _manifest_settings(
+    parser: ReferenceSemanticParser, source: Path, identity: dict[str, Any]
+) -> dict[str, object]:
+    # Copy only allowlisted primitive options. Backend identifiers and other
+    # arbitrary input strings can contain local paths or secrets.
+    generation = {
+        name.removeprefix("_"): (
+            value
+            if type(value) in (bool, int)
+            or (type(value) is float and math.isfinite(value))
+            else None
+        )
+        for name, value in identity["generation_settings"].items()
+    }
+    fingerprint = re.search(r"\+sha256\.([0-9a-f]{64})$", identity["prompt_version"])
+    return {
+        "general_guidance_sha256": fingerprint.group(1) if fingerprint else None,
+        "source_format": "jsonl" if source.suffix.lower() == ".jsonl" else "text",
+        "include_metta": bool(identity["include_metta"]),
+        "asserted_only": bool(identity["asserted_only"]),
+        "routing_enabled": bool(parser._config.enable_routing),
+        "structured_output_required": bool(parser._require_structured_output),
+        "generation": generation,
+    }
 
 
 def _file_digest(path: Path, limit: int | None = None) -> str:

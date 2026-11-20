@@ -73,6 +73,7 @@ def run_export(arguments: argparse.Namespace) -> int:
     if result.student_pairs_path is not None:
         print(f"Student pairs: {result.accepted} -> {result.student_pairs_path}")
     print(f"Source metadata: {result.metadata_path}")
+    print(f"Version manifest: {result.versions_path}")
     return 2 if result.rejected else 0
 
 

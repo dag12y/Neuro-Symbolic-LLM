@@ -12,7 +12,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
 
-from parser.ontology.catalog import DEFAULT_BUNDLE_MANIFEST, load_manifest_catalog
+from parser.ontology.catalog import (
+    DEFAULT_BUNDLE_MANIFEST,
+    OntologyCatalog,
+    load_manifest_catalog,
+)
 from parser.semantic.catalog_prompt import _load_prompt_config
 
 from .hashing import canonical_json
@@ -44,10 +48,11 @@ class SemanticComponentIDs:
     """Exact record IDs for one bundle-backed parser definition snapshot."""
 
     ontology_modules: Mapping[str, str]
-    ontology_bundle: str
+    ontology_bundle: str | None
     contract: str
     prompts: Mapping[str, str]
     parser: str
+    effective_catalog: str | None = None
 
 
 def _literal_label(source: bytes, path: str, name: str) -> str:
@@ -98,7 +103,7 @@ def _git_producer(
 
 
 def _read_definitions(
-    root: Path,
+    root: Path, effective_catalog: OntologyCatalog | None,
 ) -> tuple[
     dict[str, ComponentRecord],
     ComponentRecord,
@@ -120,7 +125,9 @@ def _read_definitions(
         manifest_file = snapshot / "bundles" / manifest_path.name
         manifest_file.parent.mkdir()
         manifest_file.write_bytes(manifest_bytes)
-        _, manifest = load_manifest_catalog(manifest_file, ontology_directory=snapshot)
+        default_catalog, manifest = load_manifest_catalog(
+            manifest_file, ontology_directory=snapshot
+        )
 
         prompt_configs = {}
         for name, filename in _PROMPT_FILES.items():
@@ -129,6 +136,9 @@ def _read_definitions(
             staged.write_bytes(data)
             label, _ = _load_prompt_config(staged, name)
             prompt_configs[name] = (label, sha256(data).hexdigest())
+
+    if effective_catalog is not None and effective_catalog != default_catalog:
+        return {}, _catalog_record(effective_catalog), prompt_configs
 
     modules = {
         name: ComponentRecord(
@@ -156,8 +166,37 @@ def _read_definitions(
     return modules, bundle, prompt_configs
 
 
+def _catalog_record(catalog: OntologyCatalog) -> ComponentRecord:
+    payload = {
+        "versions": list(catalog.versions),
+        "types": sorted(catalog.types),
+        "relations": {
+            key: {
+                "name": relation.name,
+                "ontology": relation.ontology,
+                "ontology_version": relation.ontology_version,
+                "arguments": [
+                    [argument.name, list(argument.allowed_types)]
+                    for argument in relation.arguments
+                ],
+                "confidence_range": list(relation.confidence_range),
+                "extraction_instruction": relation.extraction_instruction,
+            }
+            for key, relation in catalog.relations.items()
+        },
+    }
+    return ComponentRecord(
+        kind="ontology-catalog",
+        name="active",
+        content_digest=sha256(canonical_json(payload)).hexdigest(),
+        digest_scope="canonical effective ontology catalog v1",
+        details={"ontology_versions": list(catalog.versions)},
+    )
+
+
 def _prompt_records(
     modules: Mapping[str, ComponentRecord],
+    ontology: ComponentRecord,
     contract: ComponentRecord,
     hashes: Mapping[str, str],
     configs: Mapping[str, tuple[str, str]],
@@ -168,17 +207,22 @@ def _prompt_records(
         name: Dependency("ontology-module", module.record_id)
         for name, module in modules.items()
     }
-    if "discourse" not in ontology_refs or len(ontology_refs) < 2:
-        raise ValueError("A semantic snapshot requires discourse and general modules")
-
-    general_refs = tuple(
-        ref for key, ref in ontology_refs.items() if key != "discourse"
-    )
+    if ontology.kind == "ontology-catalog":
+        general_refs = discourse_refs = (
+            Dependency("effective-ontology", ontology.record_id),
+        )
+    else:
+        if "discourse" not in ontology_refs or len(ontology_refs) < 2:
+            raise ValueError("A semantic snapshot requires discourse and general modules")
+        general_refs = tuple(
+            ref for key, ref in ontology_refs.items() if key != "discourse"
+        )
+        discourse_refs = (ontology_refs["discourse"],)
     prompts = {}
     for name, selected in (
         ("router", ()),
         ("general", general_refs),
-        ("discourse", (ontology_refs["discourse"],)),
+        ("discourse", discourse_refs),
     ):
         label, yaml_hash = configs[name]
         sources = {
@@ -215,6 +259,7 @@ def _prompt_records(
         details={"source_sha256": routed_sources},
     )
     student_sources = {_STUDENT: hashes[_STUDENT]}
+    student_refs = tuple(ontology_refs.values()) or general_refs
     prompts["student"] = ComponentRecord(
         kind="student-prompt",
         name="student",
@@ -222,7 +267,7 @@ def _prompt_records(
         label_role="family",
         content_digest=_source_set(student_sources),
         digest_scope="prompt definition source set v1",
-        dependencies=(contract_ref, *ontology_refs.values()),
+        dependencies=(contract_ref, *student_refs),
         details={"source_sha256": student_sources},
     )
     return prompts
@@ -233,10 +278,16 @@ def register_semantic_components(
     *,
     project_root: str | Path = ".",
     include_git_provenance: bool = False,
+    effective_catalog: OntologyCatalog | None = None,
 ) -> SemanticComponentIDs:
-    """Register the default bundle, contract, prompts, and parser from a checkout."""
+    """Register parser definitions and the default bundle or effective catalog.
+
+    A different runtime catalog is captured from its validated in-memory
+    definitions without attributing its contents to the default YAML files.
+    """
     root = Path(project_root).resolve()
-    modules, bundle, prompt_configs = _read_definitions(root)
+    modules, ontology, prompt_configs = _read_definitions(root, effective_catalog)
+    has_bundle = ontology.kind == "ontology-bundle"
     sources = {
         path: (root / path).read_bytes()
         for path in (*_PARSER_SOURCES, _SCHEMA, _TEACHER, _STUDENT)
@@ -253,6 +304,7 @@ def register_semantic_components(
     )
     prompts = _prompt_records(
         modules,
+        ontology,
         contract,
         hashes,
         prompt_configs,
@@ -268,7 +320,7 @@ def register_semantic_components(
         digest_scope="parser implementation source set v1",
         dependencies=(
             Dependency("semantic-contract", contract.record_id),
-            Dependency("ontology-bundle", bundle.record_id),
+            Dependency(ontology.kind, ontology.record_id),
             *(
                 Dependency(f"{name}-prompt", record.record_id)
                 for name, record in prompts.items()
@@ -281,13 +333,14 @@ def register_semantic_components(
         ),
         details={"source_sha256": parser_sources},
     )
-    for record in (*modules.values(), bundle, contract, *prompts.values(), parser):
+    for record in (*modules.values(), ontology, contract, *prompts.values(), parser):
         registry.register(record)
     return SemanticComponentIDs(
         ontology_modules=MappingProxyType(
             {name: record.record_id for name, record in modules.items()}
         ),
-        ontology_bundle=bundle.record_id,
+        ontology_bundle=ontology.record_id if has_bundle else None,
+        effective_catalog=None if has_bundle else ontology.record_id,
         contract=contract.record_id,
         prompts=MappingProxyType(
             {name: record.record_id for name, record in prompts.items()}

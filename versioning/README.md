@@ -175,3 +175,87 @@ records = verify_manifest(Path(sys.argv[1]).read_bytes())
 print("verified", len(records), "records with root", records[-1].record_id)
 PY
 ```
+
+## Version manifests for parser exports
+
+Run the normal export with an already configured model profile and a new
+output path. This command runs the parser against your configured backend.
+
+```bash
+.venv/bin/python -m parser.semantic export-documents \
+  --input data/source.jsonl --output data/results.jsonl
+```
+
+The exporter writes `data/results.jsonl.versions.json` beside the finalized
+parse-result JSONL. Python callers receive its path as
+`ExportResult.versions_path`. The sidecar covers the primary JSONL. Rejected
+rows, source metadata, and optional student pairs keep their existing formats
+and are outside this sidecar's verification scope.
+
+The JSON has three top-level fields.
+
+| Field | Contents |
+| --- | --- |
+| `export_manifest_version` | Format version `1` |
+| `artifact` | M1 `parser-export-artifact` record. Its `name` is the portable output basename, its `content_digest` hashes the exact final JSONL bytes, and its single dependency is the parser implementation record. `details` holds the input file SHA-256, allowlisted effective settings, and unresolved items. |
+| `components` | Embedded M1 manifest with the parser implementation as its root and the complete reachable component records, including available version labels. |
+
+An effective catalog that matches the validated default catalog uses the M2
+bundle records. Other catalogs use a hash of the actual in-memory definitions
+and report their declared ontology versions. Their original YAML files and
+bundle labels are unresolved. Run settings include routing, structured-output
+and rendering options, and available numeric or boolean backend settings.
+The general guidance hash is the baseline fingerprint exposed by the parser.
+Per-document prompt fingerprints remain in each exported row's provenance.
+The sidecar excludes document text, input paths, and arbitrary model and
+provider strings.
+
+### Inspect and verify offline
+
+```bash
+.venv/bin/python -m json.tool data/results.jsonl.versions.json
+
+.venv/bin/python - data/results.jsonl.versions.json <<'PY'
+import sys
+
+from versioning.export import verify_export_sidecar
+
+artifact = verify_export_sidecar(sys.argv[1])
+print("Verified artifact ID:", artifact.record_id)
+print("Output SHA-256:", artifact.content_digest)
+print("Parser record ID:", artifact.dependencies[0].record_id)
+PY
+```
+
+Copy the JSONL and sidecar together, keeping their basenames. Verification
+checks the embedded component graph, the artifact record and its parser link,
+and the adjacent output bytes. It reports malformed or inconsistent data and
+missing files. This checks internal integrity. Authenticity requires a
+trusted artifact ID or an external signature. The recorded source hash can be
+compared separately when the original input is available.
+
+### Recovery
+
+The sidecar is published from a temporary file after all output files are
+finalized and before the export checkpoint is removed. A sidecar publication
+failure reports an error and retains the complete checkpoint. Fix the cause
+and rerun the same command with `--resume` to finish publication without
+repeating inference. A resume also completes any pending artifact renames.
+If publication succeeded before an interruption in checkpoint cleanup, resume
+accepts the identical sidecar and removes the checkpoint.
+
+A fresh run refuses existing output, partials, checkpoints, and sidecars.
+For a fresh export, choose a new output path or move the old output set and
+its sidecar together first. Resume refuses a sidecar left beside an incomplete
+export or a conflicting sidecar beside a complete one. Inspect and move the
+stale sidecar aside before retrying. Use one writer per export destination.
+
+New checkpoints pin the captured component identity and settings. Pre-M3
+checkpoints can resume under the existing fingerprint checks, with the
+earlier prefix's exact component provenance reported as unresolved. Keep the
+source input, checkout, and backend setup stable during an export and its
+recovery. If finalization detects an input or definition change during the
+run, the checkpoint is invalidated and a fresh export is required. The manifest records selected source definitions and effective
+options. It cannot reproduce fully rendered provider requests, provider-side
+state, resolved model weights, tokenizer templates, or the exact dependency
+environment.
