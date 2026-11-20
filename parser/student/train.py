@@ -10,9 +10,15 @@ HOW TO RUN:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
+import platform
+import re
+from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 import torch
@@ -28,6 +34,9 @@ from parser.semantic.dataset import (
     verify_split_overlap,
 )
 from parser.student.student_prompt import STUDENT_PROMPT
+from versioning import Registry, canonical_json, export_manifest, hash_file
+from versioning.checkpoint import checkpoint_save, register_training_provenance
+from versioning.semantic import register_semantic_components
 
 if TYPE_CHECKING:
     from parser.ontology.catalog import OntologyCatalog
@@ -43,15 +52,38 @@ def load_config(config_path: str = "configs/parser_config/student_config.yaml") 
 # ── Load training data ────────────────────────────────────────────────────────
 
 
+class _HashedInput(io.FileIO):
+    """Hash the exact bytes consumed by the UTF-8 JSONL reader in one pass."""
+
+    def __init__(self, path: Path):
+        super().__init__(path, "r")
+        self.digest = sha256()
+
+    def readinto(self, buffer):
+        count = super().readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+        return count
+
+
 def load_pairs(
-    train_file: str, *, catalog: OntologyCatalog | None = None
+    train_file: str,
+    *,
+    catalog: OntologyCatalog | None = None,
+    digests: dict[str, str] | None = None,
 ) -> list[dict]:
     train_path = Path(train_file)
     if not train_path.exists():
         raise FileNotFoundError(f"Training data not found: {train_file}")
 
+    raw = _HashedInput(train_path) if digests is not None else None
+    reader = (
+        io.TextIOWrapper(io.BufferedReader(raw), encoding="utf-8")
+        if raw is not None
+        else open(train_path, encoding="utf-8")
+    )
     pairs = []
-    with open(train_path, encoding="utf-8") as f:
+    with reader as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if line:
@@ -63,6 +95,8 @@ def load_pairs(
                         f"Invalid pair at {train_path}:{line_number}: {error}"
                     ) from error
                 pairs.append(pair)
+    if raw is not None and digests is not None:
+        digests[train_file] = raw.digest.hexdigest()
     print(f"  Loaded {len(pairs)} pairs from {train_file}")
     return pairs
 
@@ -101,21 +135,42 @@ def apply_lora(model, lora_config: dict):
     return model
 
 
+# Default weight filenames and shards used by the student loader.
+_STUDENT_WEIGHT_FILE = re.compile(
+    r"(?:model(?:-\d{5}-of-\d{5})?\.safetensors|"
+    r"pytorch_model(?:-\d{5}-of-\d{5})?\.bin|"
+    r"model\.safetensors\.index\.json|pytorch_model\.bin\.index\.json)"
+)
+
+
 # ── Save model ─────────────────────────────────────────────────────────────────
 
 
-def save_model(model, tokenizer, output_dir: str, metadata: dict) -> None:
+def save_model(
+    model,
+    tokenizer,
+    output_dir: str,
+    metadata: dict,
+    training_manifest: bytes | None = None,
+) -> None:
     """Save model, tokenizer, and metadata."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    model.save_pretrained(output_path)
-    tokenizer.save_pretrained(output_path)
+    with checkpoint_save(output_path, training_manifest):
+        # The student loader requires this file. Retire the previous metadata
+        # before changing weights so an interrupted overwrite cannot reuse it.
+        metadata_path = output_path / "training_metadata.json"
+        metadata_path.unlink(missing_ok=True)
+        # Transformers can prefer a previous unsharded file to a new shard index.
+        for path in output_path.iterdir():
+            if path.is_file() and _STUDENT_WEIGHT_FILE.fullmatch(path.name):
+                path.unlink()
+        model.save_pretrained(output_path)
+        tokenizer.save_pretrained(output_path)
 
-    with open(
-        output_path / "training_metadata.json", "w", encoding="utf-8"
-    ) as meta_file:
-        json.dump(metadata, meta_file, indent=2)
+        with metadata_path.open("w", encoding="utf-8") as meta_file:
+            json.dump(metadata, meta_file, indent=2)
 
     print(f"\n  Model saved to: {output_dir}")
     print("  Files saved:")
@@ -125,6 +180,71 @@ def save_model(model, tokenizer, output_dir: str, metadata: dict) -> None:
             print(f"    - {file_path.name} ({size / 1024:.1f} MB)")
         else:
             print(f"    - {file_path.name} ({size:.1f} KB)")
+
+
+def _training_manifest(
+    catalog: OntologyCatalog,
+    settings: dict,
+    train_sha256: str | None,
+    val_sha256: str | None,
+    train_data: StudentDataset,
+    val_data: StudentDataset,
+) -> bytes:
+    """Capture only digests of inputs, effective token sequences and source code."""
+    root = Path(__file__).resolve().parents[2]
+    packages = {}
+    for package in ("torch", "transformers", "peft", "tokenizers", "PyYAML"):
+        try:
+            packages[package] = version(package)
+        except PackageNotFoundError:
+            packages[package] = None
+    datasets = {}
+    for name, dataset in (("training", train_data), ("validation", val_data)):
+        digest = None
+        if hasattr(dataset, "examples"):
+            digest = sha256()
+            for example in dataset.examples:
+                digest.update(canonical_json(example) + b"\n")
+        datasets[name] = {
+            "count": len(dataset),
+            "ordered_token_examples_sha256": digest.hexdigest() if digest else None,
+        }
+    with TemporaryDirectory() as directory:
+        registry = Registry(directory)
+        ids = register_semantic_components(
+            registry, project_root=root, effective_catalog=catalog
+        )
+        ontology_id = ids.effective_catalog or ids.ontology_bundle
+        assert ontology_id is not None
+        training_id = register_training_provenance(
+            registry,
+            student_prompt_id=ids.prompts["student"],
+            ontology_id=ontology_id,
+            details={
+                "train_file_sha256": train_sha256,
+                "validation_file_sha256": val_sha256,
+                "datasets": datasets,
+                "settings": settings,
+                "code_sha256": {
+                    path: hash_file(root / path)
+                    for path in (
+                        "parser/student/train.py",
+                        "parser/semantic/dataset.py",
+                        "parser/semantic/catalog_student.py",
+                        "parser/ontology/catalog.py",
+                    )
+                },
+                "python_version": platform.python_version(),
+                "packages": packages,
+                "cuda_build": torch.version.cuda,
+                "unresolved": [
+                    "base weights and tokenizer byte identities",
+                    "GPU kernels, device placement, sampler order and RNG states",
+                    "optimizer state and full environment",
+                ],
+            },
+        )
+        return export_manifest(registry, training_id)
 
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
@@ -219,22 +339,15 @@ def train(
 
     # Step 1: Load training pairs
     print("\nSTEP 1: Loading training data")
-    all_pairs = (
-        load_pairs(train_file, catalog=catalog)
-        if catalog is not None
-        else load_pairs(train_file)
-    )
+    input_digests: dict[str, str] = {}
+    all_pairs = load_pairs(train_file, catalog=catalog, digests=input_digests)
 
     if len(all_pairs) == 0:
         raise ValueError(f"No valid pairs found in {train_file}")
 
     if val_file is not None:
         train_pairs = all_pairs
-        val_pairs = (
-            load_pairs(val_file, catalog=catalog)
-            if catalog is not None
-            else load_pairs(val_file)
-        )
+        val_pairs = load_pairs(val_file, catalog=catalog, digests=input_digests)
     else:
         train_pairs, val_pairs, _ = split_pairs(
             all_pairs,
@@ -307,6 +420,72 @@ def train(
     model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={"use_reentrant": False}
     )
+    # Capture resolved settings before PEFT wraps the base model.
+    revision = getattr(model.config, "_commit_hash", None)
+    resolved_revision = (
+        revision
+        if isinstance(revision, str)
+        and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision)
+        else None
+    )
+    public_model_id = (
+        base_model
+        if resolved_revision
+        and isinstance(base_model, str)
+        and re.fullmatch(r"[A-Za-z0-9_-][\w.-]*/[A-Za-z0-9_-][\w.-]*", base_model)
+        and not base_model.startswith(("hf_", "sk-", "ghp_"))
+        and not Path(base_model).exists()
+        else None
+    )
+    config_bytes = yaml.safe_dump(config, sort_keys=True).encode()
+    settings = {
+        "method": "lora" if method == "lora" else "full",
+        "base_model": public_model_id,
+        "requested_model_identifier_sha256": sha256(str(base_model).encode()).hexdigest(),
+        "student_prompt_version": training_prompt_version,
+        "device_type": model.device.type,
+        "device_map": "auto",
+        "gradient_checkpointing": True,
+        "base_model_revision": resolved_revision,
+        "config_sha256": sha256(config_bytes).hexdigest(),
+        "config_scope": "parsed YAML reserialized by PyYAML, sorted keys",
+        "epochs": train_cfg["epochs"],
+        "batch_size": train_cfg["batch_size"],
+        "learning_rate": train_cfg["learning_rate"],
+        "gradient_accumulation_steps": accumulation_steps,
+        "optimizer": "AdamW",
+        "scheduler": train_cfg.get("lr_scheduler", "constant"),
+        "warmup_steps": 0,
+        "seed": int(train_cfg.get("seed", 42)),
+        "dtype": "bfloat16" if use_bf16 else "float32",
+        "bf16_requested": bf16,
+        "max_length": max_length,
+        "split": "explicit" if val_file is not None else "seeded",
+        "validation_fraction": None if val_file is not None else val_split,
+    }
+    if method == "lora":
+        targets = lora_cfg.get("target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"])
+        common_targets = {
+            "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
+        }
+        lora_numbers = {
+            key: value if type(value) in (int, float) else None
+            for key, value in {
+                "r": lora_cfg.get("r", 16),
+                "alpha": lora_cfg.get("alpha", 32),
+                "dropout": lora_cfg.get("dropout", 0.05),
+            }.items()
+        }
+        settings["lora"] = {
+            **lora_numbers,
+            "target_modules": (
+                targets
+                if isinstance(targets, list)
+                and all(isinstance(t, str) and t in common_targets for t in targets)
+                else None
+            ),
+            "target_modules_sha256": sha256(canonical_json(targets)).hexdigest(),
+        }
     # Step 6: Apply method
     if method == "lora":
         print("\nSTEP 5: Applying LoRA adapters")
@@ -326,6 +505,21 @@ def train(
         optimizer=optimizer,
         num_warmup_steps=0,
         num_training_steps=updates_per_epoch * train_cfg["epochs"],
+    )
+    settings["optimizer_defaults"] = {
+        "betas": list(optimizer.defaults["betas"]),
+        "eps": optimizer.defaults["eps"],
+        "weight_decay": optimizer.defaults["weight_decay"],
+        "amsgrad": optimizer.defaults["amsgrad"],
+    }
+    settings["updates_per_epoch"] = updates_per_epoch
+    training_manifest = _training_manifest(
+        catalog,
+        settings,
+        input_digests.get(train_file),
+        input_digests.get(val_file) if val_file is not None else None,
+        train_dataset,
+        val_dataset,
     )
     optimizer.zero_grad()
     model.train()
@@ -450,7 +644,7 @@ def train(
         "learning_rate": train_cfg["learning_rate"],
     }
 
-    save_model(model, tokenizer, output_dir, metadata)
+    save_model(model, tokenizer, output_dir, metadata, training_manifest)
 
     return output_dir
 

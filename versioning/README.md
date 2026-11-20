@@ -259,3 +259,88 @@ run, the checkpoint is invalidated and a fresh export is required. The manifest 
 options. It cannot reproduce fully rendered provider requests, provider-side
 state, resolved model weights, tokenizer templates, or the exact dependency
 environment.
+
+## Student training and checkpoints
+
+The student trainer saves one final Hugging Face checkpoint after the last
+validation pass and, for LoRA, after merging adapters. Model files, tokenizer
+files, and the existing `training_metadata.json` live in the checkpoint
+directory. A fixed tracking flag inside the directory indicates that a sidecar
+is expected. A sibling file named `<directory>.checkpoint.versions.json` travels
+with the directory. It contains `checkpoint_manifest_version: 1` and a portable
+M1 manifest in `components`, rooted at a `student-checkpoint` record.
+
+The checkpoint digest uses the M1 directory format. It covers all relative
+names, regular file bytes, shards, metadata, and empty directories. Use a
+dedicated checkpoint directory. Adding an unrelated file also changes its
+digest. The digest includes the fixed flag. The sibling sidecar and its saving
+marker live outside the hashed directory. The `training` dependency identifies a `student-training` record. Its
+two dependencies identify the student prompt and the effective ontology
+bundle or in-memory catalog, including the reachable contract and modules.
+
+The training record contains raw JSONL SHA-256 digests computed while reading
+and separate ordered digests for the actual training and validation token
+examples. Each token digest streams canonical JSON examples followed by LF
+before shuffling or batch padding. The record also includes the seed, split
+mode, effective training settings, parsed config digest, selected training
+source hashes, Python and library versions, and the CUDA build version.
+LoRA module selections are hashed. Local model paths and free-form locators
+are represented by a digest. A namespaced model identifier is included when the loaded model configuration
+reports a resolved commit and the identifier does not point to a local path. Nulls
+indicate unavailable values. Uncaptured weights, tokenizer identity, runtime
+state and other reproducibility gaps are listed under `unresolved`.
+Raw examples and arbitrary config fields stay out of the manifest. The
+existing Hugging Face artifacts and training metadata retain their own content.
+
+### Inspect and verify
+
+From the repository root, set the directory to the trained checkpoint.
+
+```bash
+CHECKPOINT=models/semantic_document_parser
+.venv/bin/python -m json.tool "${CHECKPOINT}.checkpoint.versions.json"
+.venv/bin/python - "$CHECKPOINT" <<'PY'
+import sys
+from versioning.checkpoint import verify_student_checkpoint
+
+record = verify_student_checkpoint(sys.argv[1])
+if record is None:
+    print("Checkpoint provenance unavailable (no manifest)")
+else:
+    print("Checkpoint record", record.record_id)
+    print("Directory SHA-256", record.content_digest)
+    print("Training record", record.dependencies[0].record_id if record.dependencies else "unavailable")
+PY
+```
+
+Run the offline save, overwrite, tampering and compatibility tests with
+`.venv/bin/python -m pytest -q tests/unit/test_student_checkpoint_versions.py tests/unit/test_student_train.py`.
+The verifier checks the directory and dependency graph without importing model
+libraries or contacting a provider. Authenticity requires a separately trusted
+record ID. Byte integrity does not establish model quality or deterministic
+training replay.
+
+### Interrupted saves and legacy checkpoints
+
+Saves and verifications coordinate through a POSIX directory lock. Before the
+existing in-place save starts, the writer atomically publishes a `saving`
+marker at the sidecar path. It removes the previous training metadata before
+writing weights and restores metadata after model and tokenizer saves succeed.
+It retires the previous default weight files, shards and indexes so the loader
+selects the newly saved weights.
+This prevents the student loader from accepting old metadata after a partial
+save. The writer replaces the marker with the success manifest only after
+model, tokenizer and metadata writes finish and the directory
+hash succeeds. A failure propagates to the caller. While the marker is present,
+verification reports an incomplete save. Retry the full save with the trained
+model still in memory, rerun training, or restore a previously verified
+directory and its matching sidecar together. An interrupted in-place overwrite
+may have modified the old weights. A stale or malformed sidecar blocks a new
+save at that location. Archive the existing pair or choose a fresh destination.
+
+Existing checkpoint loaders retain their contract, prompt and ontology checks.
+A directory without a sidecar or tracking flag has unavailable provenance and
+remains eligible for those checks. A tracked directory with a missing sidecar
+fails verification, including after an interrupted save. A direct `save_model` call without a captured training
+run records checkpoint integrity and explicitly marks training provenance
+unavailable.
