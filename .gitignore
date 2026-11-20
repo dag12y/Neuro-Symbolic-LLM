@@ -139,3 +139,6 @@ Thumbs.db
 .DS_Store
 runs/
 models/
+
+# Local component registry
+.version-registry/

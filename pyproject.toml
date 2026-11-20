@@ -93,6 +93,7 @@ include = [
     "residual*",
     "stages*",
     "metrics*",
+    "versioning*",
 ]
 
 [tool.setuptools.package-data]
