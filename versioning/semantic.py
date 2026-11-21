@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import ntpath
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from struct import pack
@@ -73,8 +73,11 @@ def _mapping(value: object, label: str) -> dict[str, Any]:
     return value
 
 
-def _read_yaml(path: Path) -> tuple[str, dict[str, Any]]:
-    text = path.read_text(encoding="utf-8")
+def _read_yaml(
+    path: Path, read_bytes: Callable[[Path], bytes]
+) -> tuple[str, dict[str, Any]]:
+    # Preserve the runtime loaders' UTF-8 text-mode newline handling.
+    text = read_bytes(path).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     try:
         value = yaml.load(text, Loader=_ProjectionLoader)
         return text, _mapping(value, path.name)
@@ -103,7 +106,11 @@ class CatalogInputs:
 
 
 def load_catalog_inputs(
-    directory: Path, default_manifest: Path, selected_manifest: Path | None
+    module_paths: Iterable[Path],
+    default_manifest: Path,
+    selected_manifest: Path | None,
+    *,
+    read_bytes: Callable[[Path], bytes] = Path.read_bytes,
 ) -> CatalogInputs:
     """Validate exactly the captured text using the runtime catalog loaders."""
     documents = {}
@@ -111,20 +118,24 @@ def load_catalog_inputs(
         captured = Path(temporary)
         modules = captured / "modules"
         modules.mkdir()
-        for path in sorted(directory.glob("*.yaml")):
-            text, documents[path.stem] = _read_yaml(path)
+        for path in sorted(module_paths):
+            text, documents[path.stem] = _read_yaml(path, read_bytes)
             (modules / path.name).write_text(text, encoding="utf-8")
         full = load_ontology_catalog(modules)
 
         default_copy = captured / "default.yaml"
-        default_copy.write_text(_read_yaml(default_manifest)[0], encoding="utf-8")
+        default_copy.write_text(
+            _read_yaml(default_manifest, read_bytes)[0], encoding="utf-8"
+        )
         miner_catalog, miner_manifest = load_manifest_catalog(
             default_copy, ontology_directory=modules
         )
         selected, manifest = miner_catalog, miner_manifest
         if selected_manifest is not None and selected_manifest != default_manifest:
             selected_copy = captured / "selected.yaml"
-            selected_copy.write_text(_read_yaml(selected_manifest)[0], encoding="utf-8")
+            selected_copy.write_text(
+                _read_yaml(selected_manifest, read_bytes)[0], encoding="utf-8"
+            )
             selected, manifest = load_manifest_catalog(
                 selected_copy, ontology_directory=modules
             )
@@ -186,9 +197,14 @@ def miner_bundle_projection(
     }
 
 
-def grammar_projection(path: Path, vocabulary: dict[str, int]) -> dict[str, object]:
+def grammar_projection(
+    path: Path,
+    vocabulary: dict[str, int],
+    *,
+    read_bytes: Callable[[Path], bytes] = Path.read_bytes,
+) -> dict[str, object]:
     """Project the arity tables read by Atomese validation."""
-    _, document = _read_yaml(path)
+    _, document = _read_yaml(path, read_bytes)
     structural = _mapping(document.get("structural"), "Structural grammar")
     operators = _mapping(document.get("operators"), "Grammar operators")
     if (structural.keys() & operators.keys()) or (
@@ -232,7 +248,9 @@ def _text(value: object, label: str) -> str:
     return value
 
 
-def prompt_templates(directory: Path) -> dict[str, dict[str, object]]:
+def prompt_templates(
+    directory: Path, *, read_bytes: Callable[[Path], bytes] = Path.read_bytes
+) -> dict[str, dict[str, object]]:
     """Capture loaded template strings and labels used by the routed parser."""
     configs = {
         "router": ("parser_prompt.yaml", ("{source_text}",)),
@@ -244,7 +262,7 @@ def prompt_templates(directory: Path) -> dict[str, dict[str, object]]:
     }
     prompts: dict[str, dict[str, object]] = {}
     for name, (filename, placeholders) in configs.items():
-        _, config = _read_yaml(directory / filename)
+        _, config = _read_yaml(directory / filename, read_bytes)
         version = _text(config.get("prompt_version"), f"{name} prompt version")
         template = _text(config.get("system_prompt"), f"{name} prompt text")
         _require_placeholders(template, placeholders, name)
@@ -288,9 +306,11 @@ _PROVIDERS = {
 }
 
 
-def backend_projection(path: Path) -> dict[str, object]:
+def backend_projection(
+    path: Path, *, read_bytes: Callable[[Path], bytes] = Path.read_bytes
+) -> dict[str, object]:
     """Project the active reference backend without reading the environment."""
-    _, document = _read_yaml(path)
+    _, document = _read_yaml(path, read_bytes)
     active = _text(document.get("active"), "Active profile")
     profiles = _mapping(document.get("profiles"), "Model profiles")
     profile = _mapping(profiles.get(active), f"Profile {active!r}")

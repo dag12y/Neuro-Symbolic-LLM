@@ -161,7 +161,11 @@ is M2b. Pass `--recipe m2a` to reproduce the historical source-only recipe.
 Both recipes can coexist in the same registry, and existing M2a manifests
 continue to verify. The generic verifier checks hashes and graph structure.
 `versioning.symbolic.validate_symbolic_definition(nodes, root_id)` checks the
-specific composite recipe slots and shared inputs.
+symbolic recipe, including exact M2b semantic projection labels and versions,
+required dependency roles and targets, shared sources, and selected catalog
+membership and versions. It rejects unexpected reachable semantic nodes. It
+validates the recipe shape and declarations from the manifest. Checking the
+declared values against original source files still requires those files.
 
 ### M2b inventory
 
@@ -216,3 +220,27 @@ loader code from the captured directory. This is a definition snapshot.
 It excludes CLI overrides beyond the bundle selector, environment values,
 actual model or miner contents, and execution inputs and outputs. A
 definition change does not establish a compatibility change.
+
+The backend projection follows `build_reference_semantic_parser()` and
+`create_backend()`. It captures the active profile's provider, model or
+model environment-variable name, provider-specific environment-variable
+names and token limit, Ollama options, Transformers' `add_special_tokens`
+setting, and the explicit `role: student` check. Reference mode can select
+the student-named profile, in which case it follows the same reference
+factory. It reads no environment values, credentials, or local checkpoint
+metadata. The separate `build_distilled_semantic_parser()` entry point
+defaults to `semantic_document_student`, requires a Transformers student
+profile, and uses its device and distilled token-limit defaults without
+calling `create_backend()`. That profile selection, device, and checkpoint
+are outside the M2b backend declaration. The graph still tracks the
+catalog-derived student prompt instructions.
+
+Each build uses the bytes it first reads for the referenced inputs. Before
+registration it rereads those files once and, for M2b, rechecks the ontology
+directory's YAML membership. This covers `pyproject.toml`, source files, the
+catalog inputs and selected manifests, prompts, grammar, and backend YAML.
+A detectable change aborts the snapshot before SQLite registration. This is
+a bounded consistency check. It can miss a change reverted before its
+recheck or a change after that input has been rechecked. It provides no
+atomic filesystem snapshot. Node, projection, and recipe versions are
+unchanged.

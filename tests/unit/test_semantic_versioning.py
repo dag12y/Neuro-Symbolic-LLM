@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from shutil import copyfile
@@ -9,11 +10,15 @@ import yaml
 from parser.grammar.atomese import ARITY, VARIABLE_ARITY
 from parser.ontology.catalog import load_manifest_catalog
 from parser.semantic.catalog_prompt import build_catalog_document_prompt
-from versioning.hashing import hash_file
-from versioning.manifest import export_manifest, verify_manifest
-from versioning.nodes import Node
+from versioning.hashing import canonical_json, hash_file
+from versioning.manifest import MANIFEST_VERSION, export_manifest, verify_manifest
+from versioning.nodes import Dependency, Node, reachable_nodes
 from versioning.registry import Registry
-from versioning.semantic import SemanticChange, compare_parser_definitions
+from versioning.semantic import (
+    SemanticChange,
+    backend_projection,
+    compare_parser_definitions,
+)
 from versioning.symbolic import (
     build_m2a_symbolic_definition,
     build_symbolic_definition,
@@ -411,3 +416,265 @@ def test_manifest_history_offline_and_idempotent_registration(
     for root, data in ((old_root, old_manifest), (new_root, new_manifest)):
         nodes = verify_manifest(data, expected_root_id=root.id)
         assert validate_symbolic_definition(nodes, root.id)[-1] == root
+
+
+@pytest.fixture(scope="module")
+def valid_definition() -> tuple[Node, ...]:
+    return build_symbolic_definition(_REPO)
+
+
+def _rewrite_semantic_node(
+    nodes: tuple[Node, ...],
+    name: str,
+    edit: Callable[[dict[str, Any], list[Dependency]], None],
+    extra: Node | None = None,
+) -> tuple[Node, ...]:
+    rewritten: dict[str, Node] = {}
+    for node in nodes:
+        payload = cast(dict[str, Any], node.to_dict()["payload"])
+        edges = [
+            Dependency(edge.role, edge.slot, rewritten[edge.target_id].id)
+            for edge in node.dependencies
+        ]
+        if node.name == name:
+            edit(payload, edges)
+        rewritten[node.id] = Node(
+            kind=node.kind,
+            name=node.name,
+            payload=payload,
+            dependencies=tuple(edges),
+        )
+    indexed = {node.id: node for node in rewritten.values()}
+    if extra is not None:
+        indexed[extra.id] = extra
+    return reachable_nodes((rewritten[nodes[-1].id].id,), indexed.__getitem__)
+
+
+@pytest.mark.parametrize(
+    ("case", "name", "error"),
+    [
+        ("projection", "prompt/router", "requires projection prompt-template"),
+        (
+            "version",
+            "prompt/student",
+            "requires projection prompt-instructions version 1",
+        ),
+        ("target", "grammar/atomese", "requires parser/grammar/atomese.py"),
+        ("kind", "grammar/atomese", "Invalid M2b slots for grammar/atomese"),
+        ("missing-builder", "prompt/student", "Invalid M2b slots for prompt/student"),
+        (
+            "missing-profile",
+            "configuration/parser-backend",
+            "Invalid M2b projection inputs",
+        ),
+        (
+            "missing-guide",
+            "prompt/discourse",
+            "Missing nodes: .*prompt-guide/discourse",
+        ),
+        (
+            "catalog-membership",
+            "ontology/selected-catalog",
+            "Missing nodes: .*module/extra",
+        ),
+        (
+            "catalog-version",
+            "ontology/selected-catalog",
+            "version does not match module",
+        ),
+        ("unexpected", "ontology/module/general", "Unexpected nodes: .*ontology/extra"),
+        (
+            "split-loader",
+            "ontology/miner-bundle",
+            "requires a shared node for parser/ontology/catalog.py",
+        ),
+    ],
+)
+def test_rejects_rehashed_invalid_semantic_recipes(
+    valid_definition: tuple[Node, ...], case: str, name: str, error: str
+) -> None:
+    nodes = _by_name(valid_definition)
+    extra = None
+    if case == "unexpected":
+        extra = Node(
+            kind="semantic_content",
+            name="ontology/extra",
+            payload={
+                "projection": "prompt-guide",
+                "version": 1,
+                "value": {"guide": ""},
+            },
+        )
+    elif case == "split-loader":
+        loader = nodes["parser/ontology/catalog.py"]
+        extra = Node(
+            kind="source",
+            name=loader.name,
+            payload={**loader.payload, "sha256": "a" * 64},
+        )
+
+    def edit(payload: dict[str, Any], edges: list[Dependency]) -> None:
+        if case == "projection":
+            payload["projection"] = "ontology-module"
+        elif case == "version":
+            payload["version"] = 2
+        elif case == "missing-profile":
+            del payload["value"]["profile"]
+        elif case == "missing-builder":
+            edges.clear()
+        elif case == "missing-guide":
+            edges[:] = [edge for edge in edges if edge.slot != "catalog-guide"]
+        elif case == "catalog-membership":
+            payload["value"]["modules"].insert(1, "extra")
+            payload["value"]["versions"].insert(1, "new-version")
+        elif case == "catalog-version":
+            payload["value"]["versions"][0] = "changed-version"
+        elif case == "target":
+            edges[:] = [edge for edge in edges if edge.slot != "grammar-loader"]
+            edges.append(
+                Dependency(
+                    "uses-source",
+                    "grammar-loader",
+                    nodes["parser/ontology/catalog.py"].id,
+                )
+            )
+        elif case == "kind":
+            edges[:] = [edge for edge in edges if edge.slot != "grammar-loader"]
+            edges.append(
+                Dependency(
+                    "uses-semantic",
+                    "grammar-loader",
+                    nodes["ontology/default-vocabulary"].id,
+                )
+            )
+        elif case == "unexpected":
+            assert extra is not None
+            edges.append(Dependency("uses-semantic", "extra", extra.id))
+        elif case == "split-loader":
+            assert extra is not None
+            edges[:] = [Dependency("uses-source", "catalog-loader", extra.id)]
+
+    altered = _rewrite_semantic_node(valid_definition, name, edit, extra)
+    root_id = altered[-1].id
+    assert root_id != valid_definition[-1].id
+    manifest = canonical_json(
+        {
+            "manifest_version": MANIFEST_VERSION,
+            "root_id": root_id,
+            "nodes": [node.to_dict() for node in sorted(altered, key=lambda n: n.id)],
+        }
+    )
+    # A fully rehashed graph can pass generic verification and still violate M2b.
+    verified = verify_manifest(manifest, expected_root_id=root_id)
+    with pytest.raises(ValueError, match=error):
+        validate_symbolic_definition(verified, root_id)
+
+
+def test_distilled_profile_is_outside_reference_definition(project: Path) -> None:
+    before = build_symbolic_definition(project)
+    config = project / _CONFIG / "model_backend.yaml"
+    document = _load(config)
+    inactive_student = document["profiles"]["semantic_document_student"]
+    inactive_student.update(
+        model="models/another-student", device="cpu", max_new_tokens=4096
+    )
+    _write(config, document)
+    assert build_symbolic_definition(project) == before
+
+    # Selecting it as active makes this a Transformers reference backend.
+    document["active"] = "semantic_document_student"
+    _write(config, document)
+    active = backend_projection(config)
+    assert active["student_role"] is True
+    assert active["model"] == "models/another-student"
+    assert active["max_new_tokens"] == 4096
+    assert active["add_special_tokens"] is False
+    inactive_student["device"] = "cuda"
+    _write(config, document)
+    assert backend_projection(config) == active
+    inactive_student["add_special_tokens"] = True
+    _write(config, document)
+    assert backend_projection(config)["add_special_tokens"] is True
+
+
+def test_reference_profile_records_variable_names_without_reading_environment(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = project / _CONFIG / "model_backend.yaml"
+    document = {
+        "active": "fixture",
+        "profiles": {
+            "fixture": {
+                "provider": "openai-compatible",
+                "model_env": "M2B_TEST_MODEL",
+                "base_url_env": "M2B_TEST_HOST",
+            }
+        },
+    }
+    _write(config, document)
+    monkeypatch.delenv("M2B_TEST_MODEL", raising=False)
+    monkeypatch.delenv("M2B_TEST_HOST", raising=False)
+    before = backend_projection(config)
+    assert before["model_env"] == "M2B_TEST_MODEL"
+    assert before["base_url_env"] == "M2B_TEST_HOST"
+    monkeypatch.setenv("M2B_TEST_MODEL", "fixture-model")
+    monkeypatch.setenv("M2B_TEST_HOST", "fixture-host")
+    assert backend_projection(config) == before
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        Path("parser/semantic/schema.py"),
+        Path("pyproject.toml"),
+        _GENERAL,
+        _BUNDLE,
+        _CONFIG / "model_backend.yaml",
+        Path("alternative.yaml"),
+    ],
+)
+def test_snapshot_rejects_changed_input_bytes_before_registration(
+    project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: Path,
+) -> None:
+    alternate = project / "alternative.yaml"
+    copyfile(project / _BUNDLE, alternate)
+    path = project / relative_path
+    read_bytes = Path.read_bytes
+    edited = False
+
+    def edit_during_capture(current: Path) -> bytes:
+        nonlocal edited
+        captured = read_bytes(current)
+        if current == path and not edited:
+            edited = True
+            path.write_bytes(captured + b"\n# changed during capture\n")
+        return captured
+
+    monkeypatch.setattr(Path, "read_bytes", edit_during_capture)
+    registry = Registry(tmp_path / "graph.sqlite3")
+    with pytest.raises(ValueError, match="snapshot input changed during capture"):
+        snapshot_symbolic(project, registry, ontology_bundle=alternate)
+    assert edited
+    assert not registry.path.exists()
+
+
+def test_snapshot_rejects_ontology_directory_membership_change(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = project / _CONFIG / "model_backend.yaml"
+    added = project / _ONTOLOGY / "added.yaml"
+    read_bytes = Path.read_bytes
+
+    def add_module_during_capture(path: Path) -> bytes:
+        if path == backend and not added.exists():
+            added.write_text("# added during capture\n", encoding="utf-8")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", add_module_during_capture)
+    registry = Registry(tmp_path / "graph.sqlite3")
+    with pytest.raises(ValueError, match="ontology module set changed during capture"):
+        snapshot_symbolic(project, registry)
+    assert not registry.path.exists()
