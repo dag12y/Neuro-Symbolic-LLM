@@ -127,3 +127,61 @@ validates the graph and recomputes identities. When supplied independently,
 Verification does not read source file bytes or resolve external references.
 Use `hash_file` separately to compare supplied files with their recorded
 digests. A verified graph can contain an unresolved external declaration.
+
+## Snapshot the checked-in symbolic definition (M2a)
+
+`snapshot-symbolic` reads `[project.optional-dependencies].miner` from the
+selected project's `pyproject.toml` with `tomllib`. It requires exactly one
+`hybrid-miner` Git direct requirement pointing to
+`https://github.com/iCog-Labs-Dev/hybrid-miner.git`. Case variants of the GitHub
+locator, an omitted `.git` suffix, and package-name variants normalize to the
+same identity. It accepts bare
+version tags such as `v0.1.1`, fully qualified `refs/tags/<tag>` selectors,
+and full 40- or 64-hex-digit commit selectors. The project convention treats
+bare version-shaped selectors as tags. Branch names, short commit IDs,
+wildcards, markers, and unexpected origins fail capture.
+
+The release node hashes the normalized declaration. Other TOML fields and
+installed package metadata do not contribute to it. The snapshot needs neither
+a miner installation nor network access. A tag or commit in the manifest is
+a declared selector, with source contents and tag-to-commit resolution outside
+the scope of verification.
+
+```bash
+root_id=$(python -m versioning snapshot-symbolic --project-root . --registry graph.sqlite3)
+python -m versioning inspect --registry graph.sqlite3 "$root_id"
+python -m versioning export-manifest --registry graph.sqlite3 "$root_id" > manifest.json
+python -m versioning verify-manifest manifest.json --expected-root "$root_id"
+```
+
+The versioned M2a definition uses required slots for the following inputs.
+Each listed source is hashed as raw bytes under its repository-relative path.
+
+| Definition | Required inputs |
+| --- | --- |
+| `symbolic/parser` | `parser/semantic/semantic_parser.py` and `parser/semantic/schema.py` |
+| `symbolic/adapter` | `symbolic_pipeline/miner_adapter.py`, `symbolic_pipeline/miner_bundle.py`, `symbolic_pipeline/document_export.py`, the shared parser schema, and the selected release |
+| `symbolic/mining` | The same selected release node. Mining is external and this checkout supplies no separate mining configuration for this recipe. |
+| `symbolic/definition` | The parser, adapter, and mining definitions |
+
+This is a limited inventory of the code at the symbolic boundaries. Ontology
+modules, bundle selection and contents, prompts, grammar, parser model profiles,
+and transitive parser support code are outside this identity and are work for
+M2b. Changes to untracked inputs may affect runtime behavior while leaving this
+root stable. Snapshot inputs come from the selected working directory, so use
+a stable checkout for the duration of capture. Run inputs, outputs, and actual
+mining runtime versions are outside this definition.
+
+Changing the declared release from `v0.1.0` to `v0.1.1` changes the release,
+adapter, mining, and root IDs. The parser ID stays stable. Changes to the
+parser implementation affect the parser and root. Changes to the conversion
+source affect the adapter and root. The shared parser schema affects both.
+Repeat snapshots reuse nodes, and each prior root and its manifest remain
+available by ID through the same registry.
+
+The CLI prints only the root ID after registration succeeds. Snapshot
+construction validates exact recipe slots, target kinds and names, and the
+shared leaves before the atomic registration. For a separately supplied
+manifest, `versioning.symbolic.validate_symbolic_definition(nodes, root_id)`
+applies those recipe-specific checks to the nodes returned by the generic
+offline verifier.

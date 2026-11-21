@@ -28,6 +28,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     verify.add_argument("path", type=Path)
     verify.add_argument("--expected-root")
 
+    snapshot = commands.add_parser(
+        "snapshot-symbolic", help="register a symbolic definition from local files"
+    )
+    snapshot.add_argument("--project-root", type=Path, default=Path("."))
+    snapshot.add_argument("--registry", required=True, type=Path)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "verify-manifest":
@@ -38,6 +44,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "inspect":
             node = Registry(args.registry).get(args.node_id)
             print(canonical_json(node.to_dict()).decode("ascii"))
+        elif args.command == "snapshot-symbolic":
+            from .symbolic import snapshot_symbolic
+
+            root = snapshot_symbolic(args.project_root, Registry(args.registry))
+            print(root.id)
         else:
             manifest = export_manifest(Registry(args.registry), args.root_id)
             print(manifest.decode("ascii"))
