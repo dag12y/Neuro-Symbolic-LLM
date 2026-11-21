@@ -5,6 +5,71 @@ captures what was identified, how its content was hashed, who produced it when
 known, and which exact records it depends on. The core runs with the Python 3.11+
 standard library and requires no Git checkout.
 
+## CLI quick start
+
+Clone the project and check out the branch containing the version tracker.
+From the checkout, use Python 3.11 or newer and an environment with PyYAML for
+semantic registration. The remaining commands use the standard library and run
+offline. In an existing project environment, substitute `.venv/bin/python` for
+`python` if needed.
+
+```bash
+git clone https://github.com/dag12y/Neuro-Symbolic-LLM.git
+cd Neuro-Symbolic-LLM
+git switch feature/version-tracker
+
+REGISTRY="$(mktemp -d)/registry"
+python -m versioning register-semantic --project-root . --registry "$REGISTRY"
+python -m versioning list --registry "$REGISTRY" --kind student-prompt
+python -m versioning status --registry "$REGISTRY"
+```
+
+Copy the full parser root ID printed by registration and use it below. The
+registry defaults to `.version-registry` in the current directory. Use the same
+`--registry` value for all commands that read or write it.
+
+```bash
+ROOT_ID=replace_with_full_parser_root_id
+python -m versioning inspect "$ROOT_ID" --registry "$REGISTRY"
+python -m versioning export-manifest "$ROOT_ID" --registry "$REGISTRY" > parser-manifest.json
+python -m versioning verify-manifest parser-manifest.json
+```
+
+`list` supports exact `--kind`, `--name`, and `--label` filters, which can
+be combined. `inspect` verifies the record identity and displays its digest
+scope and dependency references. `status` checks the entire registry for record
+integrity, missing dependencies, cycles, and release-label conflicts.
+`export-manifest` writes JSON to standard output by default. Use
+`--output PATH` to create a new file. Other commands support `--json` for
+structured output.
+
+### Verify existing artifacts offline
+
+```bash
+python -m versioning verify-export data/results.jsonl
+python -m versioning verify-export data/results.jsonl.versions.json --json
+python -m versioning verify-checkpoint models/semantic_document_parser --json
+```
+
+A component manifest describes a graph of records and can be verified on its
+own. Export and checkpoint sidecars additionally bind a graph to artifact
+bytes. Keep an export beside its sidecar with the original basename. Move a
+checkpoint directory with its sibling sidecar and rename the sidecar to match
+the new directory basename when needed.
+
+Exit code `0` means success, `1` means an operation failed, and `2` means invalid
+command usage. Checkpoint verification returns `3` for a legacy or untracked
+checkpoint with unavailable provenance. A tracked directory with a missing
+sidecar, or a sidecar with a `saving` marker, fails with code `1`. For checkpoint
+recovery, retry the save or restore a verified directory and sidecar together.
+After a parser export sidecar failure, fix the cause and resume the export
+using its existing export checkpoint.
+
+Hashes establish consistency against the supplied records. A trusted record
+ID or externally verified signature is needed for authenticity. Full replay
+also depends on the model, runtime environment, and other inputs described
+under the export and training sections.
+
 ## Records and identity
 
 A label is a human-readable name. A release label can identify only one release

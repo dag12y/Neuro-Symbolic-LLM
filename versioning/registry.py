@@ -39,22 +39,43 @@ class Registry:
         return record
 
     def _snapshot(self) -> dict[str, ComponentRecord]:
-        return {
-            path.stem: self.get(path.stem)
-            for path in sorted(self._records.glob("*.json"))
-        }
+        try:
+            paths = sorted(
+                path for path in self._records.iterdir() if path.name.endswith(".json")
+            )
+        except FileNotFoundError:
+            return {}
+        return {path.stem: self.get(path.stem) for path in paths}
+
+    def list_records(
+        self,
+        *,
+        kind: str | None = None,
+        name: str | None = None,
+        label: str | None = None,
+    ) -> list[ComponentRecord]:
+        """Read verified records in ID order with optional exact filters."""
+        return [
+            record
+            for record in self._snapshot().values()
+            if (kind is None or record.kind == kind)
+            and (name is None or record.name == name)
+            and (label is None or record.label == label)
+        ]
 
     def find(
         self, kind: str, name: str, label: str | None = None
     ) -> list[ComponentRecord]:
         """Find matching records in record ID order."""
-        return [
-            record
-            for record in self._snapshot().values()
-            if record.kind == kind
-            and record.name == name
-            and (label is None or record.label == label)
-        ]
+        return self.list_records(kind=kind, name=name, label=label)
+
+    def verify_integrity(self) -> list[ComponentRecord]:
+        """Verify record identities, release labels and all dependency graphs."""
+        records = self._snapshot()
+        check_release_labels(records.values())
+        for record_id in records:
+            dependency_order(record_id, records)
+        return list(records.values())
 
     def register(self, record: ComponentRecord) -> str:
         """Validate provenance and atomically publish an immutable record."""
