@@ -11,11 +11,12 @@ from typing import Any, TypeVar
 from .hashing import CANONICALIZATION_VERSION, canonical_json, hash_identity
 
 SCHEMA_VERSION = 1
-_KINDS = frozenset({"source", "external_release", "composite"})
+_KINDS = frozenset({"source", "external_release", "composite", "semantic_content"})
 _ROLE_TARGET = {
     "uses-source": "source",
     "uses-release": "external_release",
     "uses-component": "composite",
+    "uses-semantic": "semantic_content",
 }
 _NODE_FIELDS = {
     "schema_version",
@@ -116,6 +117,14 @@ def _validate_payload(kind: str, name: str, payload: dict[str, Any]) -> None:
             raise ValueError("Source byte_length must be a nonnegative integer")
     elif kind == "external_release":
         _validate_release(name, payload)
+    elif kind == "semantic_content":
+        _require_fields(payload, {"projection", "version", "value"}, "Semantic payload")
+        _logical_name(payload["projection"], "Projection name")
+        version = payload["version"]
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValueError("Projection version must be a positive integer")
+        if not isinstance(payload["value"], dict):
+            raise ValueError("Semantic value must be a JSON object")
     else:
         _require_fields(payload, {"recipe", "purpose"}, "Composite payload")
         recipe = _require_fields(payload["recipe"], {"name", "version"}, "Recipe")
@@ -192,7 +201,7 @@ class Node:
         _validate_payload(self.kind, self.name, payload)
 
         dependencies = _ordered_edges(self.dependencies, Dependency)
-        if self.kind != "composite" and dependencies:
+        if self.kind in {"source", "external_release"} and dependencies:
             raise ValueError(f"{self.kind} nodes cannot have dependencies")
         if self.kind == "composite" and not dependencies:
             raise ValueError("Composite nodes require at least one dependency")

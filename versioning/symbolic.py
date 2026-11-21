@@ -1,13 +1,14 @@
-"""Capture the limited M2a symbolic definition from local project inputs."""
+"""Capture versioned symbolic definitions from local project inputs."""
 
 from __future__ import annotations
 
 import re
-import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import tomllib
 
 from .nodes import Dependency, Node, reachable_nodes
 
@@ -43,6 +44,29 @@ _REQUIRED_SLOTS = {
         ("uses-component", "parser"): "symbolic/parser",
         ("uses-component", "adapter"): "symbolic/adapter",
         ("uses-component", "mining"): "symbolic/mining",
+    },
+}
+_PARSER_SUPPORT = {
+    ("uses-source", name): f"parser/semantic/{name}.py"
+    for name in ("backends", "metta_renderer", "normalization", "output_cleanup")
+}
+_M2B_SLOTS = {
+    **_REQUIRED_SLOTS,
+    "symbolic/parser": {
+        **_REQUIRED_SLOTS["symbolic/parser"],
+        **_PARSER_SUPPORT,
+        ("uses-source", "student-validation"): "parser/semantic/catalog_student.py",
+        ("uses-semantic", "catalog"): "ontology/selected-catalog",
+        ("uses-semantic", "grammar"): "grammar/atomese",
+        ("uses-semantic", "backend"): "configuration/parser-backend",
+        **{
+            ("uses-semantic", f"prompt/{name}"): f"prompt/{name}"
+            for name in ("router", "general", "discourse", "student")
+        },
+    },
+    "symbolic/adapter": {
+        **_REQUIRED_SLOTS["symbolic/adapter"],
+        ("uses-semantic", "ontology-bundle"): "ontology/miner-bundle",
     },
 }
 
@@ -115,9 +139,10 @@ def read_hybrid_miner_release(pyproject: str | Path) -> Node:
     )
 
 
-def _recipe_payload(name: str) -> dict[str, object]:
+def _recipe_payload(name: str, recipe: str = "m2a") -> dict[str, object]:
+    identifier = name.replace("symbolic/", f"symbolic/{recipe}/", 1)
     return {
-        "recipe": {"name": name.replace("symbolic/", "symbolic/m2a/", 1), "version": 1},
+        "recipe": {"name": identifier, "version": 1},
         "purpose": "definition" if name == _ROOT else "component",
     }
 
@@ -125,24 +150,27 @@ def _recipe_payload(name: str) -> dict[str, object]:
 def validate_symbolic_definition(
     nodes: Iterable[Node], root_id: str
 ) -> tuple[Node, ...]:
-    """Check the M2a recipe in a graph, including exact slots and shared leaves."""
+    """Check definition recipe slots, target identities, and shared leaves."""
     indexed = {node.id: node for node in nodes}
     ordered = reachable_nodes((root_id,), indexed.__getitem__)
     root = ordered[-1]
     if root.kind != "composite" or root.name != _ROOT:
-        raise ValueError(f"Expected M2a symbolic root {_ROOT}")
+        raise ValueError(f"Expected symbolic root {_ROOT}")
+    recipe = "m2b" if root.payload == _recipe_payload(_ROOT, "m2b") else "m2a"
+    requirements = _M2B_SLOTS if recipe == "m2b" else _REQUIRED_SLOTS
 
     by_name: dict[str, str] = {}
     for node in ordered:
         if by_name.setdefault(node.name, node.id) != node.id:
-            raise ValueError(f"M2a requires a shared node for {node.name}")
+            raise ValueError(f"{recipe.upper()} requires a shared node for {node.name}")
         if node.name == _MINER and node.payload.get("repository") != _REPOSITORY:
             raise ValueError(f"Unexpected {_MINER} repository")
         if node.kind != "composite":
             continue
-        required = _REQUIRED_SLOTS.get(node.name)
-        if required is None or node.payload != _recipe_payload(node.name):
-            raise ValueError(f"Invalid M2a recipe for {node.name}")
+        required = requirements.get(node.name)
+        stage_recipe = "m2a" if node.name == "symbolic/mining" else recipe
+        if required is None or node.payload != _recipe_payload(node.name, stage_recipe):
+            raise ValueError(f"Invalid {recipe.upper()} recipe for {node.name}")
         actual = {
             (edge.role, edge.slot): indexed[edge.target_id].name
             for edge in node.dependencies
@@ -151,40 +179,54 @@ def validate_symbolic_definition(
             missing = sorted(required.keys() - actual.keys())
             unexpected = sorted(actual.keys() - required.keys())
             raise ValueError(
-                f"Invalid M2a slots for {node.name}. "
+                f"Invalid {recipe.upper()} slots for {node.name}. "
                 f"Missing slots: {missing}. Unexpected slots: {unexpected}"
             )
         for slot, target in required.items():
             if actual[slot] != target:
                 raise ValueError(
-                    f"M2a slot {slot[0]}/{slot[1]} in {node.name} requires {target}"
+                    f"{recipe.upper()} slot {slot[0]}/{slot[1]} in {node.name} "
+                    f"requires {target}"
                 )
     return ordered
 
 
-def build_symbolic_definition(project_root: str | Path) -> tuple[Node, ...]:
-    """Build a validated definition closure from an explicit local inventory."""
-    root = Path(project_root)
+def _source(root: Path, name: str) -> Node:
+    data = (root / name).read_bytes()
+    return Node(
+        kind="source",
+        name=name,
+        payload={"sha256": sha256(data).hexdigest(), "byte_length": len(data)},
+    )
+
+
+def _capture_sources(
+    root: Path, requirements: Mapping[str, Mapping[tuple[str, str], str]]
+) -> dict[str, Node]:
     release = read_hybrid_miner_release(root / "pyproject.toml")
     nodes = {release.name: release}
     sources = {
         name
-        for slots in _REQUIRED_SLOTS.values()
+        for slots in requirements.values()
         for (role, _), name in slots.items()
         if role == "uses-source"
     }
     for name in sorted(sources):
-        data = (root / name).read_bytes()
-        nodes[name] = Node(
-            kind="source",
-            name=name,
-            payload={"sha256": sha256(data).hexdigest(), "byte_length": len(data)},
-        )
-    for name, slots in _REQUIRED_SLOTS.items():
+        nodes[name] = _source(root, name)
+    return nodes
+
+
+def _compose(
+    nodes: dict[str, Node],
+    requirements: Mapping[str, Mapping[tuple[str, str], str]],
+    recipe: str,
+) -> tuple[Node, ...]:
+    for name, slots in requirements.items():
+        stage_recipe = "m2a" if name == "symbolic/mining" else recipe
         nodes[name] = Node(
             kind="composite",
             name=name,
-            payload=_recipe_payload(name),
+            payload=_recipe_payload(name, stage_recipe),
             dependencies=tuple(
                 Dependency(role, slot, nodes[target].id)
                 for (role, slot), target in slots.items()
@@ -193,8 +235,135 @@ def build_symbolic_definition(project_root: str | Path) -> tuple[Node, ...]:
     return validate_symbolic_definition(nodes.values(), nodes[_ROOT].id)
 
 
-def snapshot_symbolic(project_root: str | Path, registry: Registry) -> Node:
+def build_m2a_symbolic_definition(project_root: str | Path) -> tuple[Node, ...]:
+    """Reconstruct the historical source-only recipe without changing its IDs."""
+    nodes = _capture_sources(Path(project_root), _REQUIRED_SLOTS)
+    return _compose(nodes, _REQUIRED_SLOTS, "m2a")
+
+
+def build_symbolic_definition(
+    project_root: str | Path, *, ontology_bundle: str | Path | None = None
+) -> tuple[Node, ...]:
+    """Build the M2b semantic definition for the selected parser bundle."""
+    from .semantic import (
+        backend_projection,
+        grammar_projection,
+        load_catalog_inputs,
+        miner_bundle_projection,
+        prompt_guides,
+        prompt_templates,
+        student_instructions,
+    )
+
+    root = Path(project_root)
+    nodes = _capture_sources(root, _M2B_SLOTS)
+    ontology = root / "parser/ontology"
+    config = root / "configs/parser_config"
+    catalog = load_catalog_inputs(
+        ontology,
+        ontology / "bundles/semantic-extraction-v1.yaml",
+        root / ontology_bundle if ontology_bundle is not None else None,
+    )
+
+    def content(
+        name: str, projection: str, value: dict[str, object], *edges: Dependency
+    ) -> None:
+        nodes[name] = Node(
+            kind="semantic_content",
+            name=name,
+            payload={"projection": projection, "version": 1, "value": value},
+            dependencies=edges,
+        )
+
+    for path in (
+        "parser/ontology/catalog.py",
+        "parser/grammar/atomese.py",
+        "parser/semantic/catalog_prompt.py",
+        "parser/semantic/model_config.py",
+        "parser/student/student_prompt.py",
+    ):
+        nodes[path] = _source(root, path)
+
+    def edge(role: str, slot: str, target: str) -> Dependency:
+        return Dependency(role, slot, nodes[target].id)
+
+    loader = edge("uses-source", "catalog-loader", "parser/ontology/catalog.py")
+    for name in catalog.selection:
+        content(f"ontology/module/{name}", "ontology-module", catalog.modules[name])
+    content(
+        "ontology/selected-catalog",
+        "ontology-catalog",
+        {
+            "modules": list(catalog.selection),
+            "versions": list(catalog.selected.versions),
+        },
+        loader,
+        *(
+            edge("uses-semantic", f"module/{name}", f"ontology/module/{name}")
+            for name in catalog.selection
+        ),
+    )
+    content(
+        "ontology/miner-bundle",
+        "miner-bundle",
+        miner_bundle_projection(catalog.miner_catalog, catalog.miner_manifest),
+        loader,
+    )
+    vocabulary = {
+        name: relation.arity for name, relation in catalog.full.relations.items()
+    }
+    content(
+        "ontology/default-vocabulary",
+        "default-vocabulary",
+        {"arities": vocabulary},
+        loader,
+    )
+    content(
+        "grammar/atomese",
+        "atomese-grammar",
+        grammar_projection(config / "atomese_grammar.yaml", vocabulary),
+        edge("uses-semantic", "vocabulary", "ontology/default-vocabulary"),
+        edge("uses-source", "grammar-loader", "parser/grammar/atomese.py"),
+    )
+    for name, guide in prompt_guides(catalog.selected).items():
+        content(f"ontology/prompt-guide/{name}", "prompt-guide", guide)
+    prompt_builder = edge(
+        "uses-source", "prompt-builder", "parser/semantic/catalog_prompt.py"
+    )
+    for name, template in prompt_templates(config).items():
+        guide_name = f"ontology/prompt-guide/{name}"
+        edges = [prompt_builder]
+        if guide_name in nodes:
+            edges.append(edge("uses-semantic", "catalog-guide", guide_name))
+        content(f"prompt/{name}", "prompt-template", template, *edges)
+    content(
+        "prompt/student",
+        "prompt-instructions",
+        student_instructions(catalog.selected),
+        edge("uses-source", "prompt-builder", "parser/student/student_prompt.py"),
+    )
+    content(
+        "configuration/parser-backend",
+        "parser-backend",
+        backend_projection(config / "model_backend.yaml"),
+        edge("uses-source", "profile-loader", "parser/semantic/model_config.py"),
+    )
+    return _compose(nodes, _M2B_SLOTS, "m2b")
+
+
+def snapshot_symbolic(
+    project_root: str | Path,
+    registry: Registry,
+    *,
+    recipe: str = "m2b",
+    ontology_bundle: str | Path | None = None,
+) -> Node:
     """Atomically register the captured closure and return its definition root."""
-    nodes = build_symbolic_definition(project_root)
+    if recipe == "m2a" and ontology_bundle is None:
+        nodes = build_m2a_symbolic_definition(project_root)
+    elif recipe == "m2b":
+        nodes = build_symbolic_definition(project_root, ontology_bundle=ontology_bundle)
+    else:
+        raise ValueError("Expected M2b or M2a without an ontology bundle override")
     registry.register_batch(nodes)
     return nodes[-1]

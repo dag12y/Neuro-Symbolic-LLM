@@ -16,10 +16,12 @@ The serialized node adds the computed `id`.
 | `source` | `sha256` over exact file bytes and nonnegative integer `byte_length`. The node name is a repository-relative logical path. |
 | `external_release` | `repository` is a normalized HTTPS Git locator with a lowercase hostname and case-preserving path. The node name is the lowercase, hyphen-separated package name. `selector` contains exactly `kind` (`tag` or `commit`) and `value` (a tag or a full lowercase Git object ID). Both selector kinds are declarations. |
 | `composite` | `recipe` contains a logical `name` and positive integer `version`. `purpose` is `component`, `definition`, or `run`. A composite has at least one dependency. |
+| `semantic_content` | `projection` names the interpretation, `version` is a positive integer, and `value` contains the projected JSON object. This M2b extension uses the existing hash domain and manifest envelope. Previously published nodes retain their IDs. |
 
 An edge contains exactly `role`, `slot`, and `target_id`. The roles
 `uses-source`, `uses-release`, and `uses-component` require targets of kinds
-`source`, `external_release`, and `composite`, respectively. Slots are logical
+`source`, `external_release`, and `composite`, respectively. M2b adds
+`uses-semantic` for `semantic_content` targets. Slots are logical
 names, unique within a role. Edges sort by `(role, slot)`. Source and release
 nodes are leaves. A recipe can assign meaning to slots, including explicit
 ordering with indexed names.
@@ -128,7 +130,7 @@ Verification does not read source file bytes or resolve external references.
 Use `hash_file` separately to compare supplied files with their recorded
 digests. A verified graph can contain an unresolved external declaration.
 
-## Snapshot the checked-in symbolic definition (M2a)
+## Snapshot the symbolic definition
 
 `snapshot-symbolic` reads `[project.optional-dependencies].miner` from the
 selected project's `pyproject.toml` with `tomllib`. It requires exactly one
@@ -154,34 +156,63 @@ python -m versioning export-manifest --registry graph.sqlite3 "$root_id" > manif
 python -m versioning verify-manifest manifest.json --expected-root "$root_id"
 ```
 
-The versioned M2a definition uses required slots for the following inputs.
-Each listed source is hashed as raw bytes under its repository-relative path.
+The CLI prints only the root ID after atomic registration. The default recipe
+is M2b. Pass `--recipe m2a` to reproduce the historical source-only recipe.
+Both recipes can coexist in the same registry, and existing M2a manifests
+continue to verify. The generic verifier checks hashes and graph structure.
+`versioning.symbolic.validate_symbolic_definition(nodes, root_id)` checks the
+specific composite recipe slots and shared inputs.
 
-| Definition | Required inputs |
+### M2b inventory
+
+The root depends on the parser, adapter, and external mining definitions.
+The default parser and adapter use `parser/ontology/bundles/semantic-extraction-v1.yaml`.
+The parser can select another bundle with `--ontology-bundle` (paths are relative
+to `--project-root` unless absolute). The adapter still uses its default bundle,
+and Atomese still loads the full default ontology directory.
+
+| Input | Captured identity and consumers |
 | --- | --- |
-| `symbolic/parser` | `parser/semantic/semantic_parser.py` and `parser/semantic/schema.py` |
-| `symbolic/adapter` | `symbolic_pipeline/miner_adapter.py`, `symbolic_pipeline/miner_bundle.py`, `symbolic_pipeline/document_export.py`, the shared parser schema, and the selected release |
-| `symbolic/mining` | The same selected release node. Mining is external and this checkout supplies no separate mining configuration for this recipe. |
-| `symbolic/definition` | The parser, adapter, and mining definitions |
+| Ontology modules and selected catalog | The default bundle selects `discourse`, `general`, `lexical`, `narrative`, `program`, `proof`, and `upper`. `upper` declares shared entity, event, proposition, and clause types. Selected modules have individual semantic IDs. The catalog uses ordered membership and versions plus its loader source. |
+| Prompts | Router, general, and discourse YAML contribute their loaded version and exact template. General and discourse prompts depend on their generated ontology guides from the selected catalog. The student prompt includes generated instructions from its builder. Python builder sources capture the formatting and fixed routing/combined instructions. |
+| Atomese grammar | Effective fixed and variable arities from `atomese_grammar.yaml`, the full ontology directory's predicate names and arities, and `parser/grammar/atomese.py`. Grammar descriptions and roles are ignored by the runtime arity loader. |
+| Backend declaration | The active reference backend profile from `model_backend.yaml` and `model_config.py`. This includes its provider, model locator or environment variable name, effective generation options, and credential/host variable names used by that provider. Inactive profiles and actual environment values are excluded. |
+| Parser implementation | Raw Python bytes for `semantic_parser.py`, `schema.py`, `backends.py`, `metta_renderer.py`, `normalization.py`, `output_cleanup.py`, and `catalog_student.py`, with catalog, grammar, and prompt builders linked from their projections. |
+| Adapter and mining | The adapter uses raw bytes of `miner_adapter.py`, `miner_bundle.py`, `document_export.py`, and the shared parser schema, plus the projected input to the miner's bundle validator. That projection contains the default bundle declaration's ID and version, catalog versions and types, and ordered predicate signatures. The adapter and external mining stage share the declared release node. |
 
-This is a limited inventory of the code at the symbolic boundaries. Ontology
-modules, bundle selection and contents, prompts, grammar, parser model profiles,
-and transitive parser support code are outside this identity and are work for
-M2b. Changes to untracked inputs may affect runtime behavior while leaving this
-root stable. Snapshot inputs come from the selected working directory, so use
-a stable checkout for the duration of capture. Run inputs, outputs, and actual
-mining runtime versions are outside this definition.
+The ontology and manifest projections validate the captured text with the
+runtime catalog loaders. Keys use canonical JSON ordering. The ontology
+loader's normalization of type names, argument names, type unions, and
+extraction instructions is retained. Type declarations are a set. Argument
+positions, types in each union, confidence bounds, and catalog version order
+are significant. Catalog order comes from sorted module filenames, so
+reordering keys in a bundle manifest leaves its identity stable. Confidence
+bounds and backend temperatures use exact big-endian IEEE-754 binary64 hex
+strings within the JSON projection, including signed zero.
 
-Changing the declared release from `v0.1.0` to `v0.1.1` changes the release,
-adapter, mining, and root IDs. The parser ID stays stable. Changes to the
-parser implementation affect the parser and root. Changes to the conversion
-source affect the adapter and root. The shared parser schema affects both.
-Repeat snapshots reuse nodes, and each prior root and its manifest remain
-available by ID through the same registry.
+YAML comments and presentation changes that preserve loaded values leave the
+semantic IDs unchanged. A `#` inside a block scalar is part of the text.
+Snapshot capture rejects duplicate or non-string mapping keys, anchors,
+aliases, merge keys, and tags outside the supported JSON-like scalar and
+collection types. That strict subset keeps ambiguous or unsupported inputs
+out of the registry. Raw Python byte changes, including comments, change the
+corresponding source node. Use `hash_file` for exact YAML byte comparisons.
+Raw YAML hashes are separate from these semantic graphs.
 
-The CLI prints only the root ID after registration succeeds. Snapshot
-construction validates exact recipe slots, target kinds and names, and the
-shared leaves before the atomic registration. For a separately supplied
-manifest, `versioning.symbolic.validate_symbolic_definition(nodes, root_id)`
-applies those recipe-specific checks to the nodes returned by the generic
-offline verifier.
+For example, a general ontology instruction change affects the module,
+selected catalog, general guide and prompt, student instructions, parser,
+and root. The miner bundle and Atomese vocabulary stay stable if their
+inputs are unchanged. An argument-type union reorder also affects the bundle
+signature. An unselected module's relation arity still affects Atomese. A
+new miner release affects the adapter, mining, and root, with a stable parser
+ID. The shared parser schema affects both parser and adapter.
+`versioning.semantic.compare_parser_definitions(before, after)` reports named
+additions, removals, and modifications in parser closures or verified manifests.
+
+Capture uses the projection rules shipped with the tracker and reads sources
+from a working directory. Keep that directory stable during capture. The
+tracker hashes changes to loader source and does not execute arbitrary
+loader code from the captured directory. This is a definition snapshot.
+It excludes CLI overrides beyond the bundle selector, environment values,
+actual model or miner contents, and execution inputs and outputs. A
+definition change does not establish a compatibility change.

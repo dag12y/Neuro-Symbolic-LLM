@@ -33,6 +33,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     snapshot.add_argument("--project-root", type=Path, default=Path("."))
     snapshot.add_argument("--registry", required=True, type=Path)
+    snapshot.add_argument("--recipe", choices=("m2a", "m2b"), default="m2b")
+    snapshot.add_argument(
+        "--ontology-bundle", type=Path, help="override the parser bundle"
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -47,7 +51,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "snapshot-symbolic":
             from .symbolic import snapshot_symbolic
 
-            root = snapshot_symbolic(args.project_root, Registry(args.registry))
+            root = snapshot_symbolic(
+                args.project_root,
+                Registry(args.registry),
+                recipe=args.recipe,
+                ontology_bundle=args.ontology_bundle,
+            )
             print(root.id)
         else:
             manifest = export_manifest(Registry(args.registry), args.root_id)

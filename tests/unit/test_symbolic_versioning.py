@@ -2,23 +2,29 @@ import json
 import sqlite3
 import subprocess
 import sys
-import tomllib
 from collections.abc import Iterable
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from typing import cast
 
 import pytest
+import tomllib
 
 from versioning.manifest import export_manifest, verify_manifest
 from versioning.nodes import Dependency, Node
 from versioning.registry import Registry
 from versioning.symbolic import (
-    build_symbolic_definition,
+    build_m2a_symbolic_definition,
     read_hybrid_miner_release,
-    snapshot_symbolic,
     validate_symbolic_definition,
 )
+from versioning.symbolic import (
+    snapshot_symbolic as _snapshot_symbolic,
+)
+
+build_symbolic_definition = build_m2a_symbolic_definition
+snapshot_symbolic = partial(_snapshot_symbolic, recipe="m2a")
 
 _CWD = Path(__file__).resolve().parents[2]
 _ORIGIN = "https://github.com/iCog-Labs-Dev/hybrid-miner.git"
@@ -41,8 +47,7 @@ _SOURCES = {
 
 def _write_requirements(pyproject: Path, *requirements: str) -> Path:
     pyproject.write_text(
-        "[project.optional-dependencies]\n"
-        f"miner = {json.dumps(requirements)}\n",
+        "[project.optional-dependencies]\n" f"miner = {json.dumps(requirements)}\n",
         encoding="utf-8",
     )
     return pyproject
@@ -287,9 +292,7 @@ def test_recipe_rejects_different_declared_leaves_for_the_two_consumers(
     project: Path,
 ) -> None:
     nodes = _by_name(build_symbolic_definition(project))
-    pyproject = _write_requirements(
-        project / "pyproject.toml", _requirement("v0.1.1")
-    )
+    pyproject = _write_requirements(project / "pyproject.toml", _requirement("v0.1.1"))
     other_release = read_hybrid_miner_release(pyproject)
     mining = _with_edges(
         nodes[_MINING], (Dependency("uses-release", _RELEASE, other_release.id),)
@@ -297,9 +300,11 @@ def test_recipe_rejects_different_declared_leaves_for_the_two_consumers(
     root = _with_edges(
         nodes[_ROOT],
         (
-            Dependency(edge.role, edge.slot, mining.id)
-            if edge.slot == "mining"
-            else edge
+            (
+                Dependency(edge.role, edge.slot, mining.id)
+                if edge.slot == "mining"
+                else edge
+            )
             for edge in nodes[_ROOT].dependencies
         ),
     )
@@ -341,6 +346,8 @@ def test_cli_prints_only_a_stable_root_id(project: Path, tmp_path: Path) -> None
         "-m",
         "versioning",
         "snapshot-symbolic",
+        "--recipe",
+        "m2a",
         "--project-root",
         str(project),
         "--registry",
