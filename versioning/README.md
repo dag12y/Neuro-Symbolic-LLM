@@ -244,3 +244,159 @@ a bounded consistency check. It can miss a change reverted before its
 recheck or a change after that input has been rechecked. It provides no
 atomic filesystem snapshot. Node, projection, and recipe versions are
 unchanged.
+
+## M3 local execution records
+
+A symbolic definition identifies the selected implementation and declarations.
+An M3 run also identifies a completed local execution's inputs, options,
+status, and materialized outputs. The existing parser and converter commands
+are still available. Use the versioning commands to execute with provenance.
+
+| Command | Required outputs | Optional outputs |
+| --- | --- | --- |
+| `run-parser-export` | `parser-results.jsonl`, `rejected.jsonl`, `metadata.jsonl` | `student-pairs.jsonl` with `--student-pairs` |
+| `run-symbolic-export` | `documents.jsonl`, `rejected.jsonl` | `ontology-bundle.json` with `--bundle-output`, `skipped-rules.jsonl` with `--skip-unsupported-rules` |
+
+Each command captures the current checkout's default M2b definition.
+`--expected-definition ROOT_ID` can pin it to an independently selected ID.
+Conversion checks the effective bundle against that definition. Parser runs
+use the default catalog and active reference backend declaration and hash
+the parser document exporter and its metadata implementation. The parser
+wrapper accepts the original exporter's text and JSONL inputs, plus
+`--corpus-id`, `--include-metta`, `--asserted-only`, and
+`--require-structured-output`. It supports fresh reference exports.
+Resume, custom bundles, manual backend overrides, and distilled parser
+execution remain available only where supported by the original runtime.
+
+Each version 1 run recipe uses this graph. Arrows follow dependencies.
+
+```text
+run (purpose: run)
+  ├─ inputs (invocation)
+  │   ├─ M2b symbolic definition
+  │   ├─ raw input source
+  │   ├─ effective bundle or reference backend declaration
+  │   ├─ effective options
+  │   └─ parser export sources (parser runs)
+  ├─ outcome (status and counts)
+  └─ materialized artifacts, one per output role
+      └─ produced-by → same invocation
+```
+
+Input and artifact identities store raw SHA-256 and byte length under portable
+logical filenames. The parser also records a hash of the effective corpus
+namespace option. The registry stores neither document bodies nor credentials.
+An optional output has a dependency only if the exporter materialized the
+file. An empty JSONL output still has its own digest. A successful batch uses
+status `completed` or `completed_with_rejections`, with counts for accepted
+rows, rejected rows, and skipped rules. The CLI prints the root ID for both,
+and returns 0 or 2 respectively. A fatal failure returns 1 and publishes no
+run root. No timestamps enter the run identity.
+
+The wrapper gives the producer a private copy of its input and stages outputs
+under the requested destination's parent. It checks the completed artifact
+set and counts, rechecks input and definition identities, then publishes
+complete files using exclusive links into a new destination directory.
+Leave that directory absent before capture and keep the registry elsewhere.
+The staged files are cleaned up on failure. If failure occurs after filesystem
+publication begins, some or all finalized files can remain in the destination.
+SQLite registration is atomic. Filesystem publication and SQLite registration
+are separate operations. Inputs, checkout files, and artifacts should stay
+stable during capture. The bounded rechecks can miss reverted changes or
+writes after a check, and there is no atomic filesystem snapshot.
+
+### Run a local conversion and verify its manifest
+
+The example uses a synthetic parser result and the project's optional pinned
+`miner` dependency. It does not call a model service or launch a mining job.
+
+```bash
+demo=$(mktemp -d)
+python - "$demo/parser-input.jsonl" <<'PY'
+import sys
+from pathlib import Path
+
+from parser.ontology.catalog import load_manifest_catalog
+from parser.semantic.schema import SemanticParseResult
+
+catalog, _ = load_manifest_catalog()
+text = "Mira left."
+fixture = SemanticParseResult.model_validate({
+    "document": {"document_id": "demo", "corpus_id": "demo", "source_text": text},
+    "provenance": {
+        "provider": "fixture", "model": "fixture",
+        "parser_version": "1.0.0", "prompt_version": "fixture",
+        "ontology_versions": list(catalog.versions),
+    },
+    "extraction": {
+        "entities": [{"id": "e1", "entity_type": "Event", "mention": {"text": text}}],
+        "assertions": [{
+            "predicate": "Event", "arguments": [{"entity_id": "e1", "role": "event_id"}],
+            "factuality": "asserted", "confidence": 0.95, "evidence": [{"text": text}],
+        }],
+        "rules": [],
+    },
+})
+Path(sys.argv[1]).write_text(fixture.model_dump_json() + "\n", encoding="utf-8")
+PY
+run_id=$(python -m versioning run-symbolic-export \
+    --input "$demo/parser-input.jsonl" --output-dir "$demo/converted" \
+    --registry "$demo/graph.sqlite3" --bundle-output)
+python -m versioning inspect --registry "$demo/graph.sqlite3" "$run_id"
+python -m versioning export-manifest --registry "$demo/graph.sqlite3" "$run_id" \
+    > "$demo/run-manifest.json"
+python -m versioning verify-manifest "$demo/run-manifest.json" --expected-root "$run_id"
+```
+
+With a configured reference backend, run the parser on a local text file
+(one document per nonempty line):
+
+```bash
+printf '%s\n' 'Mira left.' > "$demo/source.txt"
+python -m versioning run-parser-export --input "$demo/source.txt" \
+    --output-dir "$demo/parsed" --registry "$demo/graph.sqlite3" --corpus-id demo
+```
+
+Offline manifest verification recomputes identities and validates the graph.
+Supply a separately trusted expected root to verify the graph against that
+identity. Compare local file digests and lengths to artifact nodes to check
+the bytes themselves. Anyone can construct a correctly hashed graph with
+fabricated execution claims. Verification alone cannot establish that a
+producer ran, attest resolved model weights or service state, or verify the
+source behind a declared Git selector. An imported parser-result JSONL file
+contributes its raw identity. Its original parser execution is unknown to
+the conversion wrapper. This repository's supported M3 boundary ends at the
+files handed off to Hybrid Miner. Mining output provenance requires a
+supported and testable external mining execution path.
+
+A future cache could look up completed conversions with identical invocation
+IDs and verify that the materialized files still match the recorded digests
+before reuse. A matching parser invocation ID identifies the same declared
+inputs and options. A remote or nondeterministic backend may still produce
+different bytes and a different run ID. M3 always executes the producer.
+
+For independent review, verify the portable graph, then check its M3 recipe
+and the supplied artifact files. Both APIs are read-only.
+
+```python
+from pathlib import Path
+from versioning.execution import validate_symbolic_run, verify_run_artifacts
+from versioning.manifest import verify_manifest
+
+nodes = verify_manifest(Path("run.json").read_bytes(), expected_root_id=trusted_root)
+validate_symbolic_run(nodes, trusted_root)
+verify_run_artifacts(nodes, trusted_root, {
+    "accepted": Path("converted/documents.jsonl"),
+    "rejected": Path("converted/rejected.jsonl"),
+})  # Supply every optional output present in this run as well.
+```
+
+The recipe check enforces the M2b definition, shared declaration and
+invocation, exact artifact roles, effective options, and outcome invariants.
+Matching artifact bytes support integrity only. Identical run IDs can
+represent multiple observations. Publication assumes a trusted destination
+parent and registry path. The wrapper anchors output links to a directory
+descriptor and refuses final-component symlinks during artifact verification.
+After a publication failure, inspect any finalized files and retry with a
+fresh directory. Abrupt process termination may also leave private staging
+files. The tracker stores completed observations only.

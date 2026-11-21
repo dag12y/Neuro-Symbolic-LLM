@@ -11,12 +11,16 @@ from typing import Any, TypeVar
 from .hashing import CANONICALIZATION_VERSION, canonical_json, hash_identity
 
 SCHEMA_VERSION = 1
-_KINDS = frozenset({"source", "external_release", "composite", "semantic_content"})
+_KINDS = frozenset(
+    {"source", "external_release", "composite", "semantic_content", "artifact"}
+)
 _ROLE_TARGET = {
     "uses-source": "source",
     "uses-release": "external_release",
     "uses-component": "composite",
     "uses-semantic": "semantic_content",
+    "uses-artifact": "artifact",
+    "produced-by": "composite",
 }
 _NODE_FIELDS = {
     "schema_version",
@@ -109,12 +113,14 @@ def _validate_release(name: str, payload: dict[str, Any]) -> None:
 
 
 def _validate_payload(kind: str, name: str, payload: dict[str, Any]) -> None:
-    if kind == "source":
-        _require_fields(payload, {"sha256", "byte_length"}, "Source payload")
+    if kind in {"source", "artifact"}:
+        _require_fields(payload, {"sha256", "byte_length"}, f"{kind.title()} payload")
         validate_id(payload["sha256"])
         length = payload["byte_length"]
         if type(length) is not int or length < 0:
-            raise ValueError("Source byte_length must be a nonnegative integer")
+            raise ValueError(
+                f"{kind.title()} byte_length must be a nonnegative integer"
+            )
     elif kind == "external_release":
         _validate_release(name, payload)
     elif kind == "semantic_content":
@@ -205,6 +211,13 @@ class Node:
             raise ValueError(f"{self.kind} nodes cannot have dependencies")
         if self.kind == "composite" and not dependencies:
             raise ValueError("Composite nodes require at least one dependency")
+        if self.kind == "artifact" and (
+            len(dependencies) != 1
+            or (dependencies[0].role, dependencies[0].slot) != ("produced-by", "inputs")
+        ):
+            raise ValueError(
+                "Artifacts require one produced-by edge in the inputs slot"
+            )
 
         object.__setattr__(self, "payload", _freeze(payload))
         object.__setattr__(self, "dependencies", dependencies)
