@@ -93,6 +93,7 @@ include = [
     "residual*",
     "stages*",
     "metrics*",
+    "versioning*",
 ]
 
 [tool.setuptools.package-data]
@@ -147,6 +148,7 @@ known-first-party = [
     "residual",
     "stages",
     "metrics",
+    "versioning",
 ]
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
