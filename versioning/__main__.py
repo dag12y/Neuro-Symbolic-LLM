@@ -38,6 +38,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--ontology-bundle", type=Path, help="override the parser bundle"
     )
 
+    a1 = commands.add_parser(
+        "snapshot-a1",
+        allow_abbrev=False,
+        help="register an offline Stage A1 definition",
+    )
+    a1.add_argument(
+        "--config", type=Path, default=Path("configs/stage_A/a1_lora_baseline.yaml")
+    )
+    a1.add_argument("--registry", type=Path, required=True)
+    a1.add_argument("--rank", type=int)
+    a1.add_argument("--epochs", type=int)
+    a1.add_argument("--model")
+    a1.add_argument("--eval-batches", type=int)
+    a1.add_argument("--no-jit", action="store_true")
+
     adapter = commands.add_parser(
         "run-symbolic-export", help="convert parser results and record the export"
     )
@@ -67,6 +82,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "inspect":
             node = Registry(args.registry).get(args.node_id)
             print(canonical_json(node.to_dict()).decode("ascii"))
+        elif args.command == "snapshot-a1":
+            from .neural import build_a1_definition
+
+            nodes = build_a1_definition(
+                args.config,
+                model=args.model,
+                rank=args.rank,
+                epochs=args.epochs,
+                eval_batches=args.eval_batches,
+                no_jit=args.no_jit,
+            )
+            Registry(args.registry).register_batch(nodes)
+            print(nodes[-1].id)
         elif args.command == "snapshot-symbolic":
             from .symbolic import snapshot_symbolic
 

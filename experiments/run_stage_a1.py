@@ -13,7 +13,6 @@ import os
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 
 # Silence verbose C++ runtime warnings (e.g. XLA slow_operation_alarm) before JAX initializes
@@ -29,11 +28,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
+from stages.config import RunConfig as RunConfig  # noqa: E402
+from stages.config import apply_overrides as apply_overrides  # noqa: E402
 from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
 from stages.stage_A.a1 import A1Config, a1_objective  # noqa: E402
 from stages.stage_base import (  # noqa: E402
     Domain,
-    RunConfig,
     configure_logging,
     evaluate,
     evaluate_checkpoint,
@@ -93,32 +93,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Disable JAX JIT compilation for training and evaluation.",
     )
     return parser.parse_args(argv)
-
-
-def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
-    adapter, training, domains = cfg.adapter, cfg.training, cfg.domains
-    if args.rank is not None:
-        adapter = replace(adapter, rank=args.rank)
-    if args.model is not None:
-        training = replace(training, model=args.model)
-    if args.output_dir is not None:
-        training = replace(training, output_dir=args.output_dir)
-    if getattr(args, "no_jit", False):
-        training = replace(training, jit=False)
-    if args.epochs is not None and args.steps is not None:
-        raise ValueError("Cannot specify both --epochs and --steps. Use --epochs.")
-    if args.steps is not None:
-        raise ValueError("--steps has been replaced by --epochs. Use --epochs.")
-    if args.epochs is not None:
-        if args.epochs < 0:
-            raise ValueError(f"epochs must be >= 0, got {args.epochs}")
-        training = replace(training, epochs=args.epochs)
-        domains = tuple(replace(d, epochs=args.epochs) for d in domains)
-    if getattr(args, "eval_batches", None) is not None:
-        if args.eval_batches < 1:
-            raise ValueError(f"eval_batches must be >= 1, got {args.eval_batches}")
-        training = replace(training, eval_batches=args.eval_batches)
-    return replace(cfg, adapter=adapter, training=training, domains=domains)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

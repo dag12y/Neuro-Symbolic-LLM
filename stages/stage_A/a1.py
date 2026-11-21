@@ -5,31 +5,12 @@ L_A1 = L_task + lambda_kl * KL(p_F0 || p_F0+R) + lambda_wd * ||phi||^2
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any
-
 import jax
 
 from frozenllm.substrate import FrozenSubstrate
 from residual import AdapterParams, ResidualAdapter
-from stages.stage_base import base_logits, checked_kwargs
-
-
-@dataclass(frozen=True)
-class A1Config:
-    lambda_kl: float = 0.0
-    lambda_wd: float = 0.0
-
-    def __post_init__(self) -> None:
-        for name in ("lambda_kl", "lambda_wd"):
-            value = getattr(self, name)
-            if not isinstance(value, int | float) or value < 0:
-                raise ValueError(f"{name} must be a number >= 0, got {value!r}")
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> A1Config:
-        return cls(**checked_kwargs(cls, data))
+from stages.config import A1Config as A1Config
+from stages.stage_base import base_logits
 
 
 def a1_objective(

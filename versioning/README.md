@@ -400,3 +400,40 @@ descriptor and refuses final-component symlinks during artifact verification.
 After a publication failure, inspect any finalized files and retry with a
 fresh directory. Abrupt process termination may also leave private staging
 files. The tracker stores completed observations only.
+
+## M4a offline Stage A1 definition
+
+```bash
+root=$(python -m versioning snapshot-a1 --config configs/stage_A/a1_lora_baseline.yaml --registry graph.sqlite3)
+python -m versioning inspect --registry graph.sqlite3 "$root"
+python -m versioning export-manifest --registry graph.sqlite3 "$root" > a1.json
+python -m versioning verify-manifest a1.json --expected-root "$root"
+```
+
+Recipe v1 hashes whole Python modules and six semantic configuration projections.
+The root uses the driver, which references optimization and evaluation. Both
+share the adapter and data components, which share the frozen substrate.
+The source inventory in `versioning/neural.py` covers the runtime package
+initializers, architecture detection, model/tokenizer loading, interception,
+TorchAX bridge, metrics, residual implementation, batching, objective,
+training loop, configuration, writer and runner. Edits elsewhere in a shared
+module can change multiple component IDs.
+
+The runner and tracker share config classes, parsing and override handling in
+`stages/config.py`. Snapshot overrides are `--rank`, `--epochs`, `--model`,
+`--eval-batches` and `--no-jit`. Per-domain epochs are expanded in domain order.
+Explicit layers are sorted as they are during runtime resolution. A null
+layer selection or initialization width records a policy whose resolved
+value depends on the actual architecture. Coefficients use big-endian finite
+IEEE-754 binary64 encoded as 16 lowercase hex digits. Integers and booleans
+retain their types. The recipe accepts portable relative locators and
+nonnegative seeds. Strict YAML rejects duplicate keys, anchors and aliases.
+Run names, output destinations and presentation-only YAML edits do not enter
+the identity. Captured inputs are reread before registration; keep the checkout
+stable during capture. This is a bounded check with no filesystem lock.
+
+For recipe validation after offline manifest verification, call
+`versioning.neural.validate_a1_definition(nodes, root_id)`. Model and tokenizer
+locators and ordered dataset selectors are declarations. Asset bytes,
+installed framework versions, resolved architecture, checkpoints and training
+observations are outside this definition.

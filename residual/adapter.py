@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any
 
@@ -22,6 +21,7 @@ from frozenllm.substrate.architecture import (
     Architecture,
     validate_interception_layers,
 )
+from stages.config import ResidualConfig as ResidualConfig
 
 AdapterParams = dict[str, dict[str, jax.Array]]
 
@@ -35,74 +35,6 @@ ACTIVATIONS: Mapping[str, Callable[[jax.Array], jax.Array]] = MappingProxyType(
 )
 
 MIN_NUM_LAYERS = 5
-
-
-@dataclass(frozen=True)
-class ResidualConfig:
-    """Adapter hyper-parameters; mirrors the ``adapter:`` YAML section."""
-
-    rank: int = 16
-    activation: str = "identity"
-    alpha: float | None = None
-    init_std: float | None = None
-    late_start: int | None = None
-    late_end: int | None = None
-    # Explicit blocks; replaces the late range, exclusive with late_start/late_end.
-    layers: list[int] | None = None
-    seed: int = 0
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.rank, int) or self.rank < 1:
-            raise ValueError(f"rank must be an integer >= 1, got {self.rank!r}")
-        if self.activation not in ACTIVATIONS:
-            raise ValueError(
-                f"Unknown activation {self.activation!r}. "
-                f"Expected one of {sorted(ACTIVATIONS)}."
-            )
-        if self.alpha is not None and not self.alpha > 0:
-            raise ValueError(f"alpha must be > 0 or null, got {self.alpha!r}")
-        if self.init_std is not None and not self.init_std > 0:
-            raise ValueError(f"init_std must be > 0 or null, got {self.init_std!r}")
-        for name in ("late_start", "late_end"):
-            value = getattr(self, name)
-            if value is not None and not isinstance(value, int):
-                raise ValueError(f"{name} must be an integer or null, got {value!r}")
-        if self.layers is not None:
-            if (
-                not isinstance(self.layers, list | tuple)
-                or not self.layers
-                or not all(
-                    isinstance(i, int) and not isinstance(i, bool) for i in self.layers
-                )
-            ):
-                raise ValueError(
-                    f"layers must be a non-empty list of integers or null, "
-                    f"got {self.layers!r}"
-                )
-            if self.late_start is not None or self.late_end is not None:
-                raise ValueError(
-                    "Set either layers or late_start/late_end, not both "
-                    f"(layers={self.layers!r}, late_start={self.late_start!r}, "
-                    f"late_end={self.late_end!r})."
-                )
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ResidualConfig:
-        return cls(**_checked_kwargs(cls, data))
-
-    @property
-    def scale(self) -> float:
-        return 1.0 if self.alpha is None else float(self.alpha) / self.rank
-
-
-def _checked_kwargs(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
-    known = {f.name for f in fields(cls)}
-    unknown = sorted(set(data) - known)
-    if unknown:
-        raise ValueError(
-            f"Unknown {cls.__name__} keys: {unknown}. Allowed: {sorted(known)}."
-        )
-    return dict(data)
 
 
 def resolve_late_layers(

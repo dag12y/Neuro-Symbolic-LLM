@@ -9,12 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from struct import pack
 from tempfile import TemporaryDirectory
-from typing import Any
-
-import yaml
-from yaml.events import AliasEvent
-from yaml.nodes import MappingNode
-from yaml.nodes import Node as YAMLNode
 
 from parser.ontology.catalog import (
     BundleManifest,
@@ -32,57 +26,8 @@ from parser.student.student_prompt import STUDENT_PROMPT, _instructions
 
 from .hashing import canonical_json
 from .nodes import Node, reachable_nodes
-
-_YAML_TAGS = {
-    f"tag:yaml.org,2002:{tag}"
-    for tag in ("map", "seq", "str", "int", "float", "bool", "null")
-}
-
-
-class _ProjectionLoader(yaml.SafeLoader):
-    """Use SafeLoader scalars while rejecting ambiguous structure."""
-
-    def compose_node(self, parent: YAMLNode | None, index: Any) -> YAMLNode:
-        event = self.peek_event()
-        if isinstance(event, AliasEvent) or getattr(event, "anchor", None) is not None:
-            raise ValueError("YAML anchors and aliases are unsupported")
-        node = super().compose_node(parent, index)
-        if node is None:
-            raise ValueError("Expected a YAML node")
-        if node.tag not in _YAML_TAGS:
-            raise ValueError(f"Unsupported YAML tag: {node.tag}")
-        return node
-
-    def construct_mapping(self, node: YAMLNode, deep: bool = False) -> dict[Any, Any]:
-        if not isinstance(node, MappingNode):
-            raise ValueError("Expected a YAML mapping node")
-        keys = set()
-        for key_node, _ in node.value:
-            key = self.construct_object(key_node)
-            if not isinstance(key, str):
-                raise ValueError("YAML mapping keys must be strings")
-            if key in keys:
-                raise ValueError(f"Duplicate YAML key: {key!r}")
-            keys.add(key)
-        return super().construct_mapping(node, deep=deep)
-
-
-def _mapping(value: object, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{label} must be a mapping")
-    return value
-
-
-def _read_yaml(
-    path: Path, read_bytes: Callable[[Path], bytes]
-) -> tuple[str, dict[str, Any]]:
-    # Preserve the runtime loaders' UTF-8 text-mode newline handling.
-    text = read_bytes(path).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-    try:
-        value = yaml.load(text, Loader=_ProjectionLoader)
-        return text, _mapping(value, path.name)
-    except (yaml.YAMLError, ValueError, RecursionError) as error:
-        raise ValueError(f"{path.name}: {error}") from error
+from .yaml_inputs import mapping_value as _mapping
+from .yaml_inputs import read_yaml as _read_yaml
 
 
 def _binary64(value: int | float) -> str:

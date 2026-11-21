@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import time
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,7 +20,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import yaml
 
 try:
     from datasets import load_dataset
@@ -36,24 +34,18 @@ from metrics.performance import (
     training_step_time,
 )
 from metrics.representation import loss_improvement
-from residual import AdapterParams, ResidualAdapter, ResidualConfig
+from residual import AdapterParams, ResidualAdapter
+from stages.config import DOMAIN_NAME as DOMAIN_NAME
+from stages.config import SECTIONS as SECTIONS
+from stages.config import DomainConfig as DomainConfig
+from stages.config import ResidualConfig as ResidualConfig
+from stages.config import RunConfig as RunConfig
+from stages.config import TrainingConfig as TrainingConfig
+from stages.config import checked_kwargs as checked_kwargs
+from stages.config import load_configs as load_configs
 from stages.results import RunWriter, load_params
 
-SECTIONS = ("adapter", "objective", "training", "domains")
-# Domain names become file names (params/task_<t>_<name>.npz).
-DOMAIN_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
-
 log = logging.getLogger(__name__)
-
-
-def checked_kwargs(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
-    known = {f.name for f in fields(cls)}
-    unknown = sorted(set(data) - known)
-    if unknown:
-        raise ValueError(
-            f"Unknown {cls.__name__} keys: {unknown}. Allowed: {sorted(known)}."
-        )
-    return dict(data)
 
 
 class Objective(Protocol):
@@ -72,103 +64,6 @@ class Objective(Protocol):
         labels: jax.Array | None = None,
         base: jax.Array | None = None,
     ) -> tuple[jax.Array, dict[str, jax.Array]]: ...
-
-
-@dataclass(frozen=True)
-class TrainingConfig:
-    model: str = "gpt2"
-    seq_len: int = 128
-    batch_size: int = 8
-    # Default epochs per domain; a domain's ``epochs`` overrides it.
-    epochs: int = 3
-    learning_rate: float = 1.0e-3
-    eval_batches: int = 8
-    log_every: int = 10
-    seed: int = 0
-    # Fresh Adam moments at each domain boundary.
-    reset_optimizer: bool = True
-    output_dir: str = "runs"
-    jit: bool = True
-
-    def __post_init__(self) -> None:
-        for name in ("seq_len", "batch_size", "eval_batches", "log_every"):
-            if getattr(self, name) < 1:
-                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
-        if self.epochs < 0:
-            raise ValueError(f"epochs must be >= 0, got {self.epochs}")
-        if not self.learning_rate > 0:
-            raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
-        if not isinstance(self.jit, bool):
-            raise ValueError(f"jit must be a boolean, got {self.jit!r}")
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> TrainingConfig:
-        return cls(**checked_kwargs(cls, data))
-
-
-@dataclass(frozen=True)
-class DomainConfig:
-    name: str
-    dataset: str
-    dataset_config: str | None = None
-    text_field: str = "text"
-    train_split: str = "train"
-    eval_split: str = "validation"
-    test_split: str = "test"
-    # Joins rows into one stream; use "\n\n" for one-document-per-row datasets.
-    separator: str = ""
-    epochs: int | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not DOMAIN_NAME.match(self.name):
-            raise ValueError(
-                f"Domain name must match {DOMAIN_NAME.pattern}, got {self.name!r}"
-            )
-        if self.epochs is not None and (
-            not isinstance(self.epochs, int) or self.epochs < 0
-        ):
-            raise ValueError(f"Domain {self.name!r}: epochs must be >= 0 or null.")
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> DomainConfig:
-        return cls(**checked_kwargs(cls, data))
-
-
-@dataclass(frozen=True)
-class RunConfig:
-    adapter: ResidualConfig
-    # Stage objective config: any frozen dataclass with ``from_dict``.
-    objective: Any
-    training: TrainingConfig
-    domains: tuple[DomainConfig, ...]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "adapter": asdict(self.adapter),
-            "objective": asdict(self.objective),
-            "training": asdict(self.training),
-            "domains": [asdict(d) for d in self.domains],
-        }
-
-
-def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
-    raw = yaml.safe_load(path.read_text()) or {}
-    unknown = sorted(set(raw) - set(SECTIONS))
-    if unknown:
-        raise ValueError(f"Unknown config sections in {path}: {unknown}.")
-    domains_raw = raw.get("domains")
-    if not isinstance(domains_raw, list) or not domains_raw:
-        raise ValueError(f"{path}: 'domains' must be a non-empty list of domains.")
-    domains = tuple(DomainConfig.from_dict(d) for d in domains_raw)
-    names = [d.name for d in domains]
-    if len(set(names)) != len(names):
-        raise ValueError(f"{path}: domain names must be unique, got {names}.")
-    return RunConfig(
-        adapter=ResidualConfig.from_dict(raw.get("adapter") or {}),
-        objective=objective_cls.from_dict(raw.get("objective") or {}),
-        training=TrainingConfig.from_dict(raw.get("training") or {}),
-        domains=domains,
-    )
 
 
 @dataclass(frozen=True)
