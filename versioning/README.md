@@ -480,3 +480,154 @@ because M4b has no observed training producer. Existing loader fallback between
 may therefore select the surviving weights-only archive. The pair is not
 atomic, and no inference about optimizer completeness or training provenance
 is made.
+
+## Component executions and verified joins
+
+A reference parser export writes `SemanticParseResult` JSONL. The symbolic
+exporter translates accepted results into `semantic-document-v1` JSONL and an
+ontology bundle. Hybrid Miner validates those documents, emits facts, gates
+them in PeTTa, mines support, recovers exact bindings, and constructs
+`pattern-record-v1` JSONL. Offline embedding joins each pattern's source spans
+to its corpus/document identifiers and indexes the original Unicode text.
+It encodes those contexts with the frozen substrate and projects their mean to
+template key/value vectors. This embedding JSONL is the last implemented neural
+artifact on that path. The residual A1 trainer reads dataset text and token
+blocks. No A1 input port accepts the embedding JSONL.
+
+| Component | Definition and inputs | Observed execution evidence |
+| --- | --- | --- |
+| Reference parser | M2b implementation, prompts, ontology, grammar, backend and schema, plus M3 export sources, options and exact input | Accepted, rejected, metadata and optional student pairs. With `--observe-runtime`, a success envelope shares the M3 run and adds the loaded backend class, model name and revision when reported. A producer exception gets a separate failure root. |
+| Parser student | Parser definition, trainer, prompt and dataset sources, exact YAML and training/validation pairs, or a local safetensors model directory and evaluation text | Actual trainer output files and model/tokenizer revision observations. Evaluation runs the existing student evaluator and preserves its transcript, including rejected predictions. The evaluator measures schema validity without semantic gold labels. |
+| Hybrid Miner | Declared release, source selection, documents, ontology bundle, minimum support | Exit codes of the five public modules, executed package tree digest, reported engine checkout heads, intermediate files, candidate records, and rejection files. |
+| Template encoder | Document and pattern bytes, context builder, encoder, frozen substrate sources, model, length, layer, dimension and projection seed | Loaded substrate observations, package versions and the actual embedding JSONL. |
+| Residual A1 | M4a definition, exact YAML, optional checkpoint input, model and dataset declarations | Initial adapter array identities, loaded architecture and reported revisions, ordered text rows, prepared blocks, selected evaluation prefixes, checkpoint pairs, metrics, summaries and independent evaluation JSON. |
+
+### Miner identity and runtime
+
+The miner extra in `pyproject.toml` selects the Git tag `v0.1.1`. During
+integration the advertised tag object was
+`7dd7a7ac133b0017ec91a7fd266fd1cb6e5e88f2` and its peeled commit was
+`f4a15d4a2cc9e205fbd5774a2d13b821ce7ff277`. That commit's distribution
+metadata reports version `0.1.0`. These values describe separate observations.
+Keep the observation manifest when reproducing a selection.
+
+- `resolve-miner` stores the historical declaration and an unavailable resolution by default. `--remote` consults the declared origin; network failure leaves the commit null. `--source CHECKOUT` resolves the selector against a trusted local Git object database whose configured origin matches the declaration. A local tag can differ from today's upstream tag.
+- `resolve-miner --source CHECKOUT --installed` compares source/resource bytes in the located distribution directory to the selected Git package tree. It reports match, mismatch or unavailable and the package version. The comparison excludes interpreter caches. Editable installs without a package directory at the distribution location can report unavailable.
+- `run-miner` loads regular package blobs from the resolved commit into a fresh import root, checks blob identities and launches each documented module in an isolated Python process. The working tree and ambient installed miner are outside that selection. The recorded SHA-256 inventory frames sorted repository-relative paths with NUL and the 32-byte SHA-256 of each file. Engine Git heads are reported observations. Native binaries, external engine working-tree changes and transitive Python dependencies have separate trust boundaries.
+- Full mining requires the external PeTTa and Hyperon Miner checkouts, SWI-Prolog with the required Janus integration, and Python dependencies specified by the miner release. The installed Python package supports conversion independently. The supported release workflow and engine revisions are documented upstream. [Hybrid Miner at the observed commit](https://github.com/iCog-Labs-Dev/hybrid-miner/blob/f4a15d4a2cc9e205fbd5774a2d13b821ce7ff277/README.md)
+
+### Run, link and verify
+
+Run from the project checkout using the project environment and miner extra.
+The shell example assumes an input corpus, a configured reference backend and
+the three trusted external checkouts. Each output directory must be new.
+Commands that record a run print its root on stdout. M3 exits with 2 when
+records were rejected; review its rejection file before continuing.
+
+```bash
+D=$(mktemp -d)
+DB="$D/graph.db"
+v() { python -m versioning "$@"; }
+def=$(v snapshot-symbolic --project-root . --registry "$DB")
+p=$(v run-parser-export --observe-runtime --expected-definition "$def" \
+    --input corpus.jsonl --student-pairs --output-dir "$D/parser" --registry "$DB")
+c=$(v run-symbolic-export --input "$D/parser/parser-results.jsonl" \
+    --bundle-output --output-dir "$D/conversion" --registry "$DB")
+docs=$(v link-runs "$c" --from-run "input=$p" --registry "$DB")
+
+v resolve-miner --remote --registry "$DB"
+v resolve-miner --source "$HYBRID_MINER" --installed --registry "$DB"
+m=$(v run-miner --source "$HYBRID_MINER" --petta-root "$PETTA_ROOT" \
+    --miner-root "$MINER_ROOT" --min-support 2 \
+    --bundle "$D/conversion/ontology-bundle.json" \
+    --documents "$D/conversion/documents.jsonl" --output-dir "$D/mining" --registry "$DB")
+mined=$(v link-runs "$m" --from-run "documents.jsonl=$docs" \
+    --from-run "bundle.json=$docs" --registry "$DB")
+e=$(v run-embedding --patterns "$D/mining/patterns.jsonl" \
+    --documents "$D/mining/accepted.jsonl" --model gpt2 \
+    --output-dir "$D/embedding" --registry "$DB")
+root=$(v link-runs "$e" --from-run "patterns.jsonl=$mined" \
+    --from-run "documents.jsonl=$mined" --registry "$DB")
+
+v export-manifest "$root" --registry "$DB" > "$D/manifest.json"
+v verify-manifest "$D/manifest.json" --expected-root "$root"
+v verify-output "$D/manifest.json" embeddings.jsonl "$D/embedding/embeddings.jsonl"
+v inspect-graph "$D/manifest.json" > "$D/graph.dot"
+```
+
+A join references the consumer and selected upstream records. Its recipe
+checks both run types, the allowed ports, each output's invocation, length and
+SHA-256 against the exact private input used by the consumer. A match means the
+same bytes were observed at both boundaries. Identical bytes can have multiple
+producers. The join adds evidence without changing an existing execution ID.
+A subset of ports gives a partial graph. The consumer can run before the
+upstream manifest is available. All roots can be exported individually.
+
+For externally supplied results, run the next stage directly on the supplied
+files. `import-file --kind parser-results|documents|patterns|checkpoint FILE
+--registry DB` also registers a standalone byte identity with unknown
+authorship. A compatible import ID can be passed to `link-runs --from-run
+INPUT=ID`. Type labels on imports are caller declarations. Format and semantic
+checks take place in the consuming application. Use `verify-file MANIFEST
+NODE_ID FILE` to verify any reachable source or produced artifact, including
+intermediates. `inspect --registry DB ID` prints an individual node.
+
+### Independent adapter and student runs
+
+```bash
+cfg=configs/stage_A/a1_lora_baseline.yaml
+v snapshot-a1 --config "$cfg" --registry "$DB"
+train=$(v run-a1 --config "$cfg" --output-dir "$D/a1" --registry "$DB")
+evalroot=$(v evaluate-a1 --config "$cfg" --split test \
+    --checkpoint "$D/a1/params/task_0_eurlex.npz" --output-dir "$D/eval" --registry "$DB")
+v link-runs "$evalroot" --from-run "checkpoint.npz=$train" --registry "$DB"
+
+student=$(v train-student --train-file "$D/parser/student-pairs.jsonl" \
+    --config configs/parser_config/student_config.yaml --method full \
+    --output-dir "$D/student" --registry "$DB")
+v link-runs "$student" --from-run "train.jsonl=$p" --registry "$DB"
+v evaluate-student --model-dir "$D/student" --sentences sentences.txt \
+    --output-dir "$D/student-eval" --registry "$DB"
+```
+
+Student evaluation accepts one source per UTF-8 line. Each consumed model file
+has a `model/FILENAME` port which can link to the corresponding training output.
+A1 supports the checked-in configuration format, including ordered domains,
+per-domain epoch counts and batch settings. Use YAML to set training overrides.
+The A1 observer watches the normal driver return after final testing and the
+frozen-base check. A full archive and its companion parameters must both exist
+for every task on success. Evaluation accepts an independent supplied archive,
+applies the existing path fallback and inspects the selected private copy before
+the weights-only loader reads it. Resume and optimizer restoration are outside
+this workflow. The observer records declared and reported model identities;
+a model revision, frozen check or matching tensor shape cannot authenticate all
+base-model weight files.
+
+### Publication and evidence limits
+
+New workflow recipes use the existing manifest envelope and canonicalization.
+Invocations identify inputs, settings, definitions and runtime observations.
+Produced artifacts depend on their invocation. The final run depends on those
+artifacts and its outcome. Success requires the expected per-stage output set.
+A failed attempt records its exception class and any partial regular file
+identities in its outcome. Partial bytes are discarded with the scratch
+directory. Infrastructure errors before invocation, input changes, interrupted
+publication and registry failures can leave no run record. Exclusive file
+publication and SQLite's batch transaction have separate commit points. Use a
+fresh directory after interrupted publication.
+
+Use trusted checkouts, model assets and external runtimes. Keep inputs stable
+and destination directories under your control. Bounded rereads detect ordinary
+concurrent changes. Content IDs authenticate the graph against an independently
+trusted root. They provide neither a signature by a producer nor a count of
+execution events. Identical observations can share an ID. Original model weights,
+datasets and artifact bytes remain external to SQLite and the portable manifest.
+Historical M1–M4a recipes still identify the original source trees; edits to the
+instrumented A1 driver and data loader correctly change a current A1 snapshot.
+
+The synthetic chain test exercises the parser exporter, semantic conversion,
+five documented miner command boundaries, embedding transformation, typed joins
+and offline verification. It uses a local Git fixture implementing the CLI
+contract and a deterministic encoder. Separate CPU tests run real model training
+on tiny local fixtures. Live provider inference, external PeTTa mining and
+large-model quality measurements require their respective environments.
