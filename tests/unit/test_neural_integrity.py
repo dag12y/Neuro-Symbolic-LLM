@@ -331,3 +331,19 @@ def test_fallback_prefers_existing_requested_path_over_companion(
     _write_archive(requested)
     _write_archive(companion, full=False)
     assert resolve_checkpoint_path(requested) == requested
+
+
+def test_oversized_declared_npy_header_is_rejected_before_read(tmp_path):
+    path = tmp_path / "bad.npz"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr(
+            "layer_0/A.npy", b"\x93NUMPY\x02\x00" + (2**31).to_bytes(4, "little")
+        )
+    with pytest.raises(ValueError, match="Declared NPY header"):
+        inspect_a1_checkpoint(path)
+
+
+def test_incomplete_layer_pair_is_not_an_a1_checkpoint(tmp_path):
+    path = tmp_path / "half.npz"
+    np.savez(path, **{"params/layer_0/A": np.zeros((1, 1), np.float32)})
+    assert inspect_a1_checkpoint(path).classification == "unknown"

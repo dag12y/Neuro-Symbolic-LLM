@@ -7,6 +7,7 @@ who produced them, how they were produced, or whether a model can load them.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -301,6 +302,14 @@ def hash_checkpoint_file(path: str | Path) -> tuple[str, int]:
 
 def _read_npy_header(member: IO[bytes]) -> tuple[tuple[int, ...], bool, np.dtype[Any]]:
     version = np.lib.format.read_magic(member)
+    if version not in ((1, 0), (2, 0), (3, 0)):
+        raise ValueError("Unsupported NPY version")
+    prefix = member.read(2 if version == (1, 0) else 4)
+    length = int.from_bytes(prefix, "little")
+    if length > MAX_NPY_HEADER:
+        raise ValueError("Declared NPY header exceeds inspection limit")
+    # NumPy's size check follows its read. Bound the read before handing it off.
+    member = io.BytesIO(prefix + member.read(length))
     if version == (1, 0):
         shape, fortran, dtype = np.lib.format.read_array_header_1_0(
             member, max_header_size=MAX_NPY_HEADER
@@ -373,6 +382,20 @@ def _inspect_zip(
     eocd_offset = archive_size - len(tail) + eocd
     if central_offset + central_size != eocd_offset:
         raise ValueError("Invalid ZIP central directory bounds")
+    if eocd_offset >= 20:
+        stream.seek(eocd_offset - 20)
+        if stream.read(4) == b"PK\x06\x07":
+            raise ValueError("ZIP64 locator outside inspection limits")
+    stream.seek(central_offset)
+    for _ in range(entry_count):
+        header = stream.read(46)
+        if len(header) != 46 or header[:4] != b"PK\x01\x02":
+            raise ValueError("Invalid ZIP central directory entry")
+        stream.seek(sum(struct.unpack_from("<3H", header, 28)), os.SEEK_CUR)
+        if stream.tell() > eocd_offset:
+            raise ValueError("ZIP entry outside central directory")
+    if stream.tell() != eocd_offset:
+        raise ValueError("ZIP member count differs from directory declaration")
     with zipfile.ZipFile(stream, "r") as archive:
         entries = archive.infolist()
         if len(entries) != entry_count:
@@ -411,7 +434,7 @@ def _inspect_zip(
                 raise ValueError("Checkpoint member exceeds compression-ratio limit")
 
         keys: set[str] = set()
-        parameter_info = []
+        parameter_info: list[dict[str, Any]] = []
         optimizer = []
         metadata_fields = None
         metadata_present = False
@@ -486,12 +509,22 @@ def _inspect_zip(
                         metadata_fields = tuple(sorted(parsed))
 
         full = any(key.startswith("params/") for key in keys)
-        weights = (
-            bool(parameter_info)
-            and not full
-            and not optimizer
+        prefix = "params/" if full else ""
+        params = {
+            key for key in keys if re.fullmatch(prefix + r"layer_[0-9]+/[AB]", key)
+        }
+        paired = bool(params) and all(
+            key[:-1] + ("A" if key[-1] == "B" else "B") in params for key in params
+        )
+        extras = keys - params
+        weights = paired and not extras and not full
+        full = (
+            full
+            and paired
             and all(
-                re.fullmatch(r"[^/]+/(A|B)", item["key"]) for item in parameter_info
+                key in {"__metadata__", "__opt_treedef__"}
+                or re.fullmatch(r"opt/leaf_[0-9]+", key)
+                for key in extras
             )
         )
         classification = (
