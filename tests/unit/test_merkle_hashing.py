@@ -17,8 +17,8 @@ def test_canonical_json_golden_vector() -> None:
         "a": [True, None, -(2**63), 2**63 - 1],
     }
     expected = (
-        br'{"a":[true,null,-9223372036854775808,9223372036854775807],'
-        br'"z":0,"\ue000":"\u00e9\n","\ud83d\ude00":"\u007f"}'
+        rb'{"a":[true,null,-9223372036854775808,9223372036854775807],'
+        rb'"z":0,"\ue000":"\u00e9\n","\ud83d\ude00":"\u007f"}'
     )
     assert canonical_json(value) == expected
     assert canonical_json(dict(reversed(list(value.items())))) == expected
@@ -70,14 +70,14 @@ def test_invalid_python_json_values(value: object) -> None:
     "data",
     [
         b'{"outer":{"a":1,"a":2}}',
-        br'{"a":1,"\u0061":2}',
+        rb'{"a":1,"\u0061":2}',
         b"1.0",
         b"1e2",
         b"NaN",
         b"Infinity",
         b"-9223372036854775809",
         b"9223372036854775808",
-        br'"\ud800"',
+        rb'"\ud800"',
         b'"\xff"',
         '"a"'.encode("utf-16"),
     ],

@@ -134,6 +134,8 @@ def evaluate(
     model_dir: str,
     test_sentences: list[str] | None = None,
     max_tokens: int = 3072,
+    *,
+    observe_model=None,
 ) -> None:
     """Generate and validate predictions for explicitly supplied sources."""
     from parser.semantic.semantic_parser import DistilledSemanticParser
@@ -145,6 +147,8 @@ def evaluate(
     parser = DistilledSemanticParser.from_pretrained(
         model_dir, max_new_tokens=max_tokens
     )
+    if observe_model is not None:
+        observe_model(parser.model, parser.tokenizer)
     valid = 0
     for sentence in test_sentences:
         try:
@@ -166,6 +170,8 @@ def train(
     output_dir: str | None = None,
     method: str = "full",
     val_file: str | None = None,
+    *,
+    observe_model=None,
 ) -> str:
     config = load_config(config_path)
     from parser.ontology.catalog import load_manifest_catalog
@@ -301,6 +307,8 @@ def train(
         torch_dtype=torch.bfloat16 if use_bf16 else torch.float32,
         device_map="auto",
     )
+    if observe_model is not None:
+        observe_model(model, tokenizer)
     print(f"  Parameters: {model.num_parameters() / 1e9:.2f}B")
     model.config.use_cache = False
 
@@ -310,7 +318,8 @@ def train(
     # Step 6: Apply method
     if method == "lora":
         print("\nSTEP 5: Applying LoRA adapters")
-        model = apply_lora(model, lora_cfg)
+        lora_model = apply_lora(model, lora_cfg)
+        model = lora_model
     else:
         print("\nSTEP 5: Full fine-tuning")
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -432,7 +441,7 @@ def train(
 
     if method == "lora":
         print("  Merging LoRA adapters...")
-        model = model.merge_and_unload()
+        model = lora_model.merge_and_unload()
 
     metadata = {
         "base_model": base_model,

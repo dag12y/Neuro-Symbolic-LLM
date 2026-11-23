@@ -43,6 +43,7 @@ from stages.config import RunConfig as RunConfig
 from stages.config import TrainingConfig as TrainingConfig
 from stages.config import checked_kwargs as checked_kwargs
 from stages.config import load_configs as load_configs
+from stages.observations import observe, observer
 from stages.results import RunWriter, load_params
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,8 @@ def load_token_blocks(
     texts = load_dataset(domain.dataset, domain.dataset_config, split=split)[
         domain.text_field
     ]
+    if observer.get() is not None:
+        texts = tuple(texts)
     # One contiguous token stream; the ragged tail is dropped.
     ids = substrate.tokenizer(domain.separator.join(texts), return_tensors="np")[
         "input_ids"
@@ -95,7 +98,9 @@ def load_token_blocks(
         )
     # Annotated: numpy is opaque to mypy (follow_imports = "skip").
     blocks: np.ndarray = np.asarray(ids[: n * seq_len], dtype=np.int32)
-    return blocks.reshape(n, seq_len)
+    blocks = blocks.reshape(n, seq_len)
+    observe("dataset", domain=domain.name, split=split, rows=texts, blocks=blocks)
+    return blocks
 
 
 def make_eval_set(
@@ -106,6 +111,7 @@ def make_eval_set(
     n_eval = min(len(blocks), eval_batches * batch_size)
     # Ensure static batch shapes for JAX JIT compilation by dropping partial trailing batches.
     n_full = (n_eval // batch_size) * batch_size
+    observe("eval_prefix", blocks=blocks[: n_full or n_eval], batch_size=batch_size)
     if n_full == 0 and len(blocks) > 0:
         return (jnp.asarray(blocks[:n_eval]),)
     return tuple(

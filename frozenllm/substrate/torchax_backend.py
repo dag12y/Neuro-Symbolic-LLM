@@ -39,7 +39,8 @@ def to_jax_array(value: Any) -> jax.Array:
 
 def from_jax_array(value: jax.Array) -> torch.Tensor:
     enable_torchax()
-    return interop.torch_view(value)
+    tensor: torch.Tensor = interop.torch_view(value)
+    return tensor
 
 
 def to_torchax_device(obj: T) -> T:

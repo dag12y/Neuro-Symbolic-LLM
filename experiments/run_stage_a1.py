@@ -30,6 +30,7 @@ from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
 from stages.config import RunConfig as RunConfig  # noqa: E402
 from stages.config import apply_overrides as apply_overrides  # noqa: E402
+from stages.observations import observe  # noqa: E402
 from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
 from stages.stage_A.a1 import A1Config, a1_objective  # noqa: E402
 from stages.stage_base import (  # noqa: E402
@@ -103,6 +104,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     train_cfg = cfg.training
 
     substrate = FrozenSubstrate(train_cfg.model)
+    observe("substrate", substrate=substrate)
     arch = substrate.architecture
     max_pos = arch.max_position_embeddings
     if max_pos is not None and train_cfg.seq_len > max_pos:
@@ -110,6 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     adapter = ResidualAdapter(cfg.adapter, arch)
     params = adapter.init_params()
+    observe("initial_parameters", params=params)
     n_trainable = ResidualAdapter.num_params(params)
     n_frozen = sum(p.numel() for p in substrate.params.values())
 
@@ -140,6 +143,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             eval_batches=eval_batches,
             jit=train_cfg.jit,
         )
+        observe("evaluation", results=results)
         print(json.dumps(results, indent=2))
         return 0
 

@@ -174,6 +174,7 @@ def _record_run(
     produced: _Produced,
     identities: dict[str, dict[str, object]],
     registry: Registry,
+    runtime: dict[str, object] | None = None,
 ) -> RunResult:
     prefix = f"symbolic/m3/{recipe}"
 
@@ -249,6 +250,13 @@ def _record_run(
         run,
     )
     validate_symbolic_run(batch, run.id)
+    if runtime is not None:
+        from .parser_observation import observed_parser, validate_parser
+
+        extra = observed_parser(run, runtime)
+        batch = (*batch, *extra)
+        run = extra[-1]
+        validate_parser(run, {n.id: n for n in batch})
     registry.register_batch(batch)
     return RunResult(run, produced.accepted, produced.rejected, produced.skipped_rules)
 
@@ -266,6 +274,7 @@ def _execute(
     producer: Callable[[Path, dict[str, Path], Mapping[str, Node]], _Produced],
     expected_definition: str | None,
     sources: tuple[str, ...] = (),
+    runtime: dict[str, object] | None = None,
 ) -> RunResult:
     if output_dir.exists() or output_dir.is_symlink():
         raise FileExistsError(f"Output already exists: {output_dir}")
@@ -298,7 +307,35 @@ def _execute(
         staged = scratch / "outputs"
         staged.mkdir()
         paths = {role: staged / filename for role, filename in filenames.items()}
-        produced = producer(private_input, paths, by_name)
+        try:
+            produced = producer(private_input, paths, by_name)
+        except Exception as error:
+            if runtime is None:
+                raise
+            from .parser_observation import failed_parser
+
+            if (
+                _file_identity(private_input) != identity
+                or build_symbolic_definition(_PROJECT_ROOT) != definition
+                or any(
+                    _file_identity(_PROJECT_ROOT / node.name) != node.payload
+                    for node in support
+                )
+            ):
+                raise ValueError(
+                    "Parser inputs changed during failed execution"
+                ) from error
+            failed_parser(
+                registry,
+                definition,
+                support,
+                source_name,
+                identity,
+                options,
+                runtime,
+                error,
+            )
+            raise
         identities = _observe_outputs(paths, produced)
         if build_symbolic_definition(_PROJECT_ROOT)[-1].id != definition[-1].id or any(
             _file_identity(_PROJECT_ROOT / node.name) != node.payload
@@ -344,6 +381,7 @@ def _execute(
             produced,
             identities,
             registry,
+            runtime,
         )
 
 
@@ -423,6 +461,7 @@ def record_parser_export_run(
     output_dir: Path,
     registry: Registry,
     *,
+    observe_runtime: bool = False,
     corpus_id: str | None = None,
     include_metta: bool = False,
     asserted_only: bool = False,
@@ -435,6 +474,7 @@ def record_parser_export_run(
     from parser.semantic.model_config import build_reference_semantic_parser
     from parser.semantic.semantic_parser import ModelGenerationError
 
+    runtime: dict[str, object] | None = {} if observe_runtime else None
     filenames = {
         "accepted": "parser-results.jsonl",
         "rejected": "rejected.jsonl",
@@ -492,6 +532,16 @@ def record_parser_export_run(
             catalog=catalogs.selected,
             require_structured_output=require_structured_output,
         )
+        if runtime is not None:
+            backend = getattr(parser, "_backend", None)
+            model = getattr(backend, "_model", None)
+            runtime.update(
+                model=parser.model_name,
+                backend=type(backend).__name__,
+                revision_reported=getattr(
+                    getattr(model, "config", None), "_commit_hash", None
+                ),
+            )
         try:
             result = export_catalog_documents(
                 parser,
@@ -535,6 +585,7 @@ def record_parser_export_run(
         producer=produce,
         expected_definition=expected_definition,
         sources=_PARSER_SUPPORT,
+        runtime=runtime,
     )
 
 
@@ -692,7 +743,7 @@ def verify_run_artifacts(
     }
     if set(paths) != set(artifacts):
         raise ValueError(
-            f"Artifact roles differ: missing {sorted(artifacts.keys()-paths.keys())}, unexpected {sorted(paths.keys()-artifacts.keys())}"
+            f"Artifact roles differ: missing {sorted(artifacts.keys() - paths.keys())}, unexpected {sorted(paths.keys() - artifacts.keys())}"
         )
     for role, artifact in artifacts.items():
         try:

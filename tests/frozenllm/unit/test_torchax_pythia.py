@@ -4,14 +4,14 @@ entirely against a local random-init GPTNeoXConfig, no network needed.
 
 from __future__ import annotations
 
+import pytest
 import torch
-import torchax
 from torch.func import functional_call
 from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
 
 from frozenllm.substrate.torchax_models import functional_model
 
-torchax.enable_globally()
+pytestmark = pytest.mark.usefixtures("torchax_mode")
 
 
 def _tiny_neox_model() -> GPTNeoXForCausalLM:

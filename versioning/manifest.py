@@ -58,4 +58,8 @@ def verify_manifest(
     ordered = reachable_nodes((root_id,), nodes.__getitem__)
     if len(ordered) != len(nodes):
         raise ValueError("Manifest contains unreachable nodes")
+    if ordered[-1].name.startswith("workflow/"):
+        from .lineage import validate_known
+
+        validate_known(ordered)
     return ordered

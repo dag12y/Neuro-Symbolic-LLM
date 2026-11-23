@@ -94,6 +94,8 @@ include = [
     "stages*",
     "metrics*",
     "versioning*",
+    "offline*",
+    "experiments*",
 ]
 
 [tool.setuptools.package-data]
@@ -131,6 +133,10 @@ ignore = [
     "N806",  # variable in function should be lowercase
     "N803",  # argument name should be lowercase
 ]
+
+# Identity recipes distinguish JSON integers from booleans and reject subclasses.
+[tool.ruff.lint.per-file-ignores]
+"versioning/{hashing,manifest,nodes,neural_integrity,parser_observation,workflow_stages}.py" = ["E721"]
 
 [tool.ruff.lint.isort]
 # tells ruff which packages are "yours" so imports are sorted into the right group

@@ -126,4 +126,5 @@ class FrozenLLMEncoder:
 
             vectors.append(vector[0])
 
-        return np.stack(vectors, axis=0)
+        encoded: np.ndarray = np.stack(vectors, axis=0)
+        return encoded

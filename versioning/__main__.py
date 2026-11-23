@@ -84,12 +84,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser_export.add_argument("--student-pairs", action="store_true")
     parser_export.add_argument("--require-structured-output", action="store_true")
 
+    parser_export.add_argument(
+        "--observe-runtime",
+        action="store_true",
+        help="record loaded model and backend observations, including failed executions",
+    )
+    from . import workflow_cli
+
+    workflow_cli.add_commands(commands)
     args = parser.parse_args(argv)
     try:
+        if args.command in workflow_cli.COMMANDS:
+            return workflow_cli.execute(args)
         if args.command == "verify-manifest":
             nodes = verify_manifest(
                 args.path.read_bytes(), expected_root_id=args.expected_root
             )
+            from .lineage import validate_known
+
+            validate_known(nodes)
             print(f"Verified graph {nodes[-1].id} ({len(nodes)} nodes)")
         elif args.command == "inspect":
             node = Registry(args.registry).get(args.node_id)
@@ -166,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.input,
                     args.output_dir,
                     registry,
+                    observe_runtime=args.observe_runtime,
                     corpus_id=args.corpus_id,
                     include_metta=args.include_metta,
                     asserted_only=args.asserted_only,
@@ -182,6 +196,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: node not found: {error.args[0]}", file=sys.stderr)
         return 1
     except (ImportError, OSError, ValueError, sqlite3.Error) as error:
+        from .parser_observation import ParserExecutionError
+
+        if isinstance(error, ParserExecutionError):
+            print(error.root.id)
         print(f"Error: {error}", file=sys.stderr)
         return 1
     return 0

@@ -41,7 +41,8 @@ def create_random_projection(
 
     q, _ = np.linalg.qr(random_matrix, mode="reduced")
 
-    return q.T.astype(np.float32)
+    projection: np.ndarray = q.T.astype(np.float32)
+    return projection
 
 
 def initialize_template_kv(

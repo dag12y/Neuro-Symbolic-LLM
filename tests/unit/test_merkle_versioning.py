@@ -42,8 +42,7 @@ def _graph(tag: str = "v0.1.0", *, reverse: bool = False) -> dict[str, Node]:
             name="symbolic",
             payload=_composite("definition"),
             dependencies=tuple(
-                DraftDependency("uses-component", stage, stage)
-                for stage in stages
+                DraftDependency("uses-component", stage, stage) for stage in stages
             ),
         ),
         "parser": DraftNode(

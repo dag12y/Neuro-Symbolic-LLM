@@ -49,7 +49,7 @@ def check_numerical_fidelity(
         ref_logits = model_plain(input_ids=ids).logits
 
     model_jax = to_torchax_device(model_plain)
-    params = dict(model_jax.named_parameters())
+    params: dict[str, torch.Tensor] = dict(model_jax.named_parameters())
     for p in params.values():
         p.requires_grad_(False)
 

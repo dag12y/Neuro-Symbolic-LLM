@@ -26,9 +26,8 @@ from transformers import (
 
 from frozenllm.substrate.architecture import detect_architecture
 from frozenllm.substrate.substrate import ForwardResult, FrozenSubstrate
-from frozenllm.substrate.torchax_backend import enable_torchax
 
-enable_torchax()
+pytestmark = pytest.mark.usefixtures("torchax_mode")
 
 
 def _tiny_model() -> GPT2LMHeadModel:

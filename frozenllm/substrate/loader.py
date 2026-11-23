@@ -53,7 +53,7 @@ def load_torchax_model(
     model.eval()
     model = to_torchax_device(model)
 
-    params = dict(model.named_parameters())
+    params: dict[str, torch.Tensor] = dict(model.named_parameters())
     for p in params.values():
         p.requires_grad_(False)
 
