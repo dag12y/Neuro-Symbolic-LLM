@@ -330,6 +330,12 @@ def package_digest(package: Path) -> str:
     return inventory.hexdigest()
 
 
+def _comparison(expected: str, installed: str | None) -> str:
+    if installed is None:
+        return "unavailable"
+    return "match" if installed == expected else "mismatch"
+
+
 def installed_release(repo: Path) -> tuple[Node, ...]:
     from importlib.metadata import PackageNotFoundError, distribution
     from tempfile import TemporaryDirectory
@@ -354,13 +360,7 @@ def installed_release(repo: Path) -> tuple[Node, ...]:
             "version": version,
             "source_sha256": expected,
             "installed_sha256": installed,
-            "comparison": (
-                "unavailable"
-                if installed is None
-                else "match"
-                if expected == installed
-                else "mismatch"
-            ),
+            "comparison": _comparison(expected, installed),
         },
     )
     root = composite(
@@ -396,14 +396,6 @@ def validate_installation(node: Node, index: Mapping[str, Node]) -> None:
         validate_id(value["installed_sha256"])
         if not isinstance(value["version"], str):
             raise ValueError("Missing installed version")
-    comparison = (
-        "unavailable"
-        if value["installed_sha256"] is None
-        else (
-            "match"
-            if value["source_sha256"] == value["installed_sha256"]
-            else "mismatch"
-        )
-    )
+    comparison = _comparison(value["source_sha256"], value["installed_sha256"])
     if value["comparison"] != comparison:
         raise ValueError("Inconsistent installation comparison")

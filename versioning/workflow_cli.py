@@ -247,13 +247,14 @@ def execute(args: argparse.Namespace) -> int:
                 support=args.min_support,
             )
         else:
-            handler = (
-                embed
-                if stage == "embedding"
-                else a1
-                if stage.startswith("a1-")
-                else student
-            )
+            handlers = {
+                "embedding": embed,
+                "a1-train": a1,
+                "a1-eval": a1,
+                "student-train": student,
+                "student-eval": student,
+            }
+            handler = handlers[stage]
             handler(private, out, runtime, opts)
 
     def checked_definition() -> tuple[Node, ...]:
