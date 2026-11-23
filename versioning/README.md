@@ -437,3 +437,46 @@ For recipe validation after offline manifest verification, call
 locators and ordered dataset selectors are declarations. Asset bytes,
 installed framework versions, resolved architecture, checkpoints and training
 observations are outside this definition.
+
+## M4b dataset and checkpoint integrity
+
+`versioning.neural_integrity` provides offline observations without invoking
+`datasets`, tokenizers, JAX, or a model. `dataset_selector_node` identifies the
+declared dataset/configuration, text field, split names, separator, tokenizer
+locator, sequence length, and the fixed versioned
+`join-tokenize-drop-tail-int32-reshape/v1` preprocessing declaration. It is
+distinct from `ordered_text_rows_node`, which
+hashes ordered UTF-8 rows using an eight-byte big-endian byte-length before each
+row and records the row count. Row boundaries and ordering are unambiguous.
+`token_blocks_node` accepts only a two-dimensional signed int32 array. Equal
+values are canonicalized to little-endian C-order bytes; shape, canonical dtype,
+byte order, layout, byte length and domain-separated digest are recorded.
+Dataset observation composites keep selector, rows and prepared blocks as
+separate dependencies and check block width against the declared sequence
+length. These APIs do not fetch a dataset or establish that observed rows or
+blocks came from the declared selector or tokenizer.
+
+`inspect-a1-checkpoint` streams the exact file digest and then inspects ZIP/NPY
+headers without loading NumPy arrays. It classifies recognized full A1 archives,
+weights-only archives, or unknown valid NPZ layouts; it reports parameter keys
+and shapes plus optimizer and metadata member presence (metadata values are
+not emitted; only string keys of a safely parsed JSON object are exposed). Object arrays are
+rejected. The `__opt_treedef__` bytes written by `RunWriter.save_checkpoint`
+may contain pickle data, but the inspector only identifies the member and never
+deserializes it. Limits are 1 GiB raw archive size, 16 MiB central directory,
+4 GiB per uncompressed member, 8 GiB total uncompressed content, 4096 members,
+1000:1 compression ratio, 64 KiB NPY headers, and 1 MiB optional metadata.
+ZIP64 and multi-disk archives are outside this bounded inspector. A second digest and file
+metadata checks detect ordinary concurrent mutation, but do not provide an
+atomic filesystem snapshot against arbitrary writers.
+
+`verify-a1-checkpoint FILE --expected-digest SHA256 [--expected-length N]`
+verifies exact bytes only and does not require a well-formed archive.
+`inspect-a1-checkpoint FILE` performs structural inspection. Both report
+authorship as unknown and runtime compatibility as not established. An
+imported checkpoint observation is a `source` node, never a produced artifact,
+because M4b has no observed training producer. Existing loader fallback between
+`checkpoints/` and `params/` is mirrored; after an interrupted pair, inspection
+may therefore select the surviving weights-only archive. The pair is not
+atomic, and no inference about optimizer completeness or training provenance
+is made.

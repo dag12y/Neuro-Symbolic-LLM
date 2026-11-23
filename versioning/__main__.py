@@ -53,6 +53,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     a1.add_argument("--eval-batches", type=int)
     a1.add_argument("--no-jit", action="store_true")
 
+    checkpoint = commands.add_parser(
+        "inspect-a1-checkpoint",
+        help="inspect A1 checkpoint bytes without loading arrays or pickle",
+    )
+    checkpoint.add_argument("file", type=Path)
+    verify_checkpoint = commands.add_parser(
+        "verify-a1-checkpoint", help="verify exact A1 checkpoint file bytes"
+    )
+    verify_checkpoint.add_argument("file", type=Path)
+    verify_checkpoint.add_argument("--expected-digest", required=True)
+    verify_checkpoint.add_argument("--expected-length", type=int)
+
     adapter = commands.add_parser(
         "run-symbolic-export", help="convert parser results and record the export"
     )
@@ -95,6 +107,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             Registry(args.registry).register_batch(nodes)
             print(nodes[-1].id)
+        elif args.command in ("inspect-a1-checkpoint", "verify-a1-checkpoint"):
+            from .neural_integrity import (
+                CheckpointByteVerification,
+                CheckpointInspection,
+                inspect_a1_checkpoint,
+                verify_a1_checkpoint,
+            )
+
+            if args.command == "inspect-a1-checkpoint":
+                inspected = inspect_a1_checkpoint(args.file)
+                checkpoint_result: CheckpointInspection | CheckpointByteVerification = (
+                    inspected
+                )
+                structural_inspection = inspected.classification
+            else:
+                checkpoint_result = verify_a1_checkpoint(
+                    args.file,
+                    expected_digest=args.expected_digest,
+                    expected_length=args.expected_length,
+                )
+                structural_inspection = "not_performed"
+            output = checkpoint_result.to_dict()
+            output["exact_byte_integrity"] = (
+                "verified"
+                if args.command == "verify-a1-checkpoint"
+                else "observed_not_compared"
+            )
+            output["structural_inspection"] = structural_inspection
+            output["authorship"] = "unknown"
+            output["runtime_compatibility"] = "not_established"
+            print(canonical_json(output).decode("ascii"))
         elif args.command == "snapshot-symbolic":
             from .symbolic import snapshot_symbolic
 
@@ -110,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             registry = Registry(args.registry)
             if args.command == "run-symbolic-export":
-                result = record_symbolic_export_run(
+                run_result = record_symbolic_export_run(
                     args.input,
                     args.output_dir,
                     registry,
@@ -119,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     expected_definition=args.expected_definition,
                 )
             else:
-                result = record_parser_export_run(
+                run_result = record_parser_export_run(
                     args.input,
                     args.output_dir,
                     registry,
@@ -130,8 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     require_structured_output=args.require_structured_output,
                     expected_definition=args.expected_definition,
                 )
-            print(result.root.id)
-            return 2 if result.rejected else 0
+            print(run_result.root.id)
+            return 2 if run_result.rejected else 0
         else:
             manifest = export_manifest(Registry(args.registry), args.root_id)
             print(manifest.decode("ascii"))
